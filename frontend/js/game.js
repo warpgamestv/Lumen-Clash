@@ -1,0 +1,1220 @@
+// Phaser Configuration
+const gameContainer = document.getElementById('game-container');
+const config = {
+    type: Phaser.AUTO,
+    parent: 'game-container',
+    width: gameContainer.clientWidth,
+    height: gameContainer.clientHeight,
+    backgroundColor: '#050510',
+    scene: {
+        preload: preload,
+        create: create,
+        update: update
+    },
+    scale: {
+        mode: Phaser.Scale.RESIZE,
+        autoCenter: Phaser.Scale.CENTER_BOTH
+    }
+};
+
+const game = new Phaser.Game(config);
+
+let socket;
+let myPlayerId = null;
+let gameState = null;
+let prevMyHealth = -1;
+let prevOpponentHealth = -1;
+
+// Session persistence logic
+function generateUUID() {
+    // crypto.randomUUID() only works in secure contexts (HTTPS/localhost).
+    // This fallback works on plain HTTP LAN addresses too.
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+    }
+    // Fallback using crypto.getRandomValues (works in all contexts)
+    return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+        (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+    );
+}
+
+let localUid = localStorage.getItem('lumen_clash_uid');
+if (!localUid) {
+    localUid = generateUUID();
+    localStorage.setItem('lumen_clash_uid', localUid);
+}
+
+// ============================================================
+// PROCEDURAL SOUND MANAGER  (AudioContext — no audio files)
+// ============================================================
+class SoundManager {
+    constructor() {
+        this.ctx = null; // lazy-init on first interaction
+        this.enabled = localStorage.getItem('lumen_clash_sound') !== 'off';
+    }
+    _ensureCtx() {
+        if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        if (this.ctx.state === 'suspended') this.ctx.resume();
+    }
+    _osc(freq, duration, type = 'square', gainVal = 0.12) {
+        if (!this.enabled) return;
+        this._ensureCtx();
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, this.ctx.currentTime);
+        gain.gain.setValueAtTime(gainVal, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + duration);
+        osc.connect(gain).connect(this.ctx.destination);
+        osc.start(); osc.stop(this.ctx.currentTime + duration);
+    }
+    playClick() {
+        this._osc(880, 0.06, 'square', 0.08);
+    }
+    playAttack() {
+        if (!this.enabled) return;
+        this._ensureCtx();
+        const t = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(600, t);
+        osc.frequency.linearRampToValueAtTime(150, t + 0.15);
+        gain.gain.setValueAtTime(0.15, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+        osc.connect(gain).connect(this.ctx.destination);
+        osc.start(t); osc.stop(t + 0.2);
+    }
+    playHit() {
+        if (!this.enabled) return;
+        this._ensureCtx();
+        const t = this.ctx.currentTime;
+        // noise burst
+        const bufferSize = this.ctx.sampleRate * 0.12;
+        const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+        const noise = this.ctx.createBufferSource();
+        noise.buffer = buffer;
+        const gain = this.ctx.createGain();
+        gain.gain.setValueAtTime(0.2, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+        noise.connect(gain).connect(this.ctx.destination);
+        noise.start(t); noise.stop(t + 0.12);
+        // low thud
+        this._osc(80, 0.1, 'sine', 0.2);
+    }
+    playHeal() {
+        if (!this.enabled) return;
+        this._ensureCtx();
+        const t = this.ctx.currentTime;
+        [440, 554, 659].forEach((f, i) => {
+            const osc = this.ctx.createOscillator();
+            const gain = this.ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(f, t + i * 0.08);
+            gain.gain.setValueAtTime(0.1, t + i * 0.08);
+            gain.gain.exponentialRampToValueAtTime(0.001, t + i * 0.08 + 0.2);
+            osc.connect(gain).connect(this.ctx.destination);
+            osc.start(t + i * 0.08); osc.stop(t + i * 0.08 + 0.25);
+        });
+    }
+    playShield() {
+        if (!this.enabled) return;
+        this._ensureCtx();
+        const t = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(300, t);
+        osc.frequency.linearRampToValueAtTime(900, t + 0.12);
+        gain.gain.setValueAtTime(0.12, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+        osc.connect(gain).connect(this.ctx.destination);
+        osc.start(t); osc.stop(t + 0.25);
+    }
+    playEmote() {
+        this._osc(1200, 0.04, 'sine', 0.05);
+        setTimeout(() => this._osc(1500, 0.04, 'sine', 0.05), 50);
+    }
+    playGameOver(won) {
+        if (!this.enabled) return;
+        this._ensureCtx();
+        const t = this.ctx.currentTime;
+        const notes = won ? [523, 659, 784] : [400, 350, 300];
+        notes.forEach((f, i) => {
+            const osc = this.ctx.createOscillator();
+            const gain = this.ctx.createGain();
+            osc.type = won ? 'square' : 'sawtooth';
+            osc.frequency.setValueAtTime(f, t + i * 0.15);
+            gain.gain.setValueAtTime(0.12, t + i * 0.15);
+            gain.gain.exponentialRampToValueAtTime(0.001, t + i * 0.15 + 0.35);
+            osc.connect(gain).connect(this.ctx.destination);
+            osc.start(t + i * 0.15); osc.stop(t + i * 0.15 + 0.4);
+        });
+    }
+    toggle() {
+        this.enabled = !this.enabled;
+        localStorage.setItem('lumen_clash_sound', this.enabled ? 'on' : 'off');
+        return this.enabled;
+    }
+}
+const sfx = new SoundManager();
+
+// ============================================================
+// EMOTE PRESETS (persisted in localStorage)
+// ============================================================
+const ALL_EMOTES = ['😡','😂','😭','🤠','💀','👽','🤡','👻','🔥','💪','😎','🫡','❤️','⚡','🎯','💤'];
+const DEFAULT_EMOTES = ['😂','🔥','💀','😎'];
+
+function loadEmotePresets() {
+    try {
+        const saved = JSON.parse(localStorage.getItem('lumen_clash_emotes'));
+        if (Array.isArray(saved) && saved.length === 4) return saved;
+    } catch(e) {}
+    return [...DEFAULT_EMOTES];
+}
+function saveEmotePresets(arr) {
+    localStorage.setItem('lumen_clash_emotes', JSON.stringify(arr));
+}
+let activeEmotes = loadEmotePresets();
+let emoteCooldown = false;
+
+// Presence / Social Heartbeat (Reverted to 10s Separate Polls)
+function pollMenuData() {
+    // Only poll if on main menu
+    const isMainMenu = !document.getElementById('main-menu-container').classList.contains('hidden');
+    if (isMainMenu) {
+        // Refresh social, leaderboard, and profile in background
+        fetchFriends(true);
+        
+        if (!document.getElementById('leaderboard-container').classList.contains('hidden')) {
+            fetchLeaderboard(true);
+        }
+        if (!document.getElementById('profile-container').classList.contains('hidden')) {
+            fetchPlayerProfile(true);
+        }
+    }
+}
+setInterval(pollMenuData, 10000); // Back to 10s
+pollMenuData();
+
+console.log("Auto-update heartbeat active (10s separate)");
+
+// Fetch Profile Initialization
+let myUsername = 'Player';
+async function fetchPlayerProfile(silent = false) {
+    try {
+        const res = await fetch(`/profile?uid=${localUid}`);
+        const data = await res.json();
+        myUsername = data.username || 'Player';
+        
+        document.getElementById('profile-username').innerText = myUsername;
+        document.getElementById('profile-level').innerText = data.level;
+        document.getElementById('profile-wins').innerText = data.wins;
+        document.getElementById('profile-losses').innerText = data.losses;
+
+        const neededXP = data.level * 100;
+        const xpPct = (data.xp / (neededXP || 100)) * 100;
+        document.getElementById('profile-xp-fill').style.width = `${Math.min(100, xpPct)}%`;
+        document.getElementById('profile-xp-text').innerText = `${data.xp}/${neededXP}`;
+
+        // Render match history if profile modal is open
+        const isProfileOpen = !document.getElementById('profile-container').classList.contains('hidden');
+        if (isProfileOpen && data.matchHistory && data.matchHistory.length > 0) {
+            const historyList = document.getElementById('match-history-list');
+            historyList.innerHTML = [...data.matchHistory].reverse().map(m => {
+                const date = new Date(m.timestamp).toLocaleString();
+                return `<div style="padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.1); display: flex; justify-content: space-between;">
+                    <span style="color:${m.result === 'Win' ? '#00d2ff' : '#ff0055'}; font-weight:bold;">${m.result.toUpperCase()}</span>
+                    <span style="color:#aaa; font-size:0.8rem;">+${m.xpEarned} XP</span>
+                    <span style="color:#666; font-size:0.8rem;">${date}</span>
+                </div>`;
+            }).join('');
+        }
+    } catch (e) { console.error('Profile fetch failed', e); }
+}
+
+function updateProfileUI(data) {
+    if (!data) return;
+    myUsername = data.username || 'Player';
+    document.getElementById('profile-username').innerText = myUsername;
+    document.getElementById('profile-level').innerText = data.level;
+    document.getElementById('profile-wins').innerText = data.wins;
+    document.getElementById('profile-losses').innerText = data.losses;
+
+    const neededXP = data.level * 100;
+    const xpPct = (data.xp / (neededXP || 100)) * 100;
+    document.getElementById('profile-xp-fill').style.width = `${Math.min(100, xpPct)}%`;
+    document.getElementById('profile-xp-text').innerText = `${data.xp}/${neededXP}`;
+
+    // Render match history if profile modal is open
+    const isProfileOpen = !document.getElementById('profile-container').classList.contains('hidden');
+    if (isProfileOpen && data.matchHistory && data.matchHistory.length > 0) {
+        const historyList = document.getElementById('match-history-list');
+        historyList.innerHTML = [...data.matchHistory].reverse().map(m => {
+            const date = new Date(m.timestamp).toLocaleString();
+            const color = m.result === 'Win' ? '#00d2ff' : '#ff0055';
+            return `<div style="padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.1); display: flex; justify-content: space-between;">
+                <span style="color:${color}; font-weight:bold;">${m.result.toUpperCase()}</span>
+                <span style="color:#aaa; font-size:0.8rem;">+${m.xpEarned} XP</span>
+                <span style="color:#666; font-size:0.8rem;">${date}</span>
+            </div>`;
+        }).join('');
+    }
+}
+fetchPlayerProfile();
+fetchPlayerProfile();
+
+// Character Definitions
+const CHARACTER_CLASSES = [
+    { id: 'voidWeaver', name: 'Void Weaver', stats: 'Assassin Class<br>High Burst / Low Health' },
+    { id: 'aegisKnight', name: 'Aegis Knight', stats: 'Tank Class<br>High Health / Low Damage' },
+    { id: 'lumenSage', name: 'Lumen Sage', stats: 'Mage Class<br>Lowest Health / Epic Burst' }
+];
+let selectedCharacterIndex = 0;
+
+// Phaser Scene functions
+function preload() {
+    this.load.image('voidWeaver', 'assets/void_weaver.png?v=2');
+    this.load.image('aegisKnight', 'assets/aegis_knight.png?v=2');
+    this.load.image('lumenSage', 'assets/lumen_sage.png?v=2');
+}
+
+let playerLeftShape;
+let playerRightShape;
+
+function create() {
+    // Add some starry/sci-fi background particles
+    const particles = this.add.particles(0, 0, 'dummy', {
+        x: { min: 0, max: this.scale.width },
+        y: { min: 0, max: this.scale.height },
+        lifespan: 3000,
+        speed: { min: 10, max: 20 },
+        angle: { min: 0, max: 360 },
+        gravityY: 0,
+        scale: { start: 0.2, end: 0 },
+        quantity: 2,
+        blendMode: 'ADD'
+    });
+    // Create a dummy texture for particles
+    const graphics = this.make.graphics();
+    graphics.fillStyle(0xffffff, 1);
+    graphics.fillCircle(2, 2, 2);
+    graphics.generateTexture('dot', 4, 4);
+    particles.setTexture('dot');
+
+    // Dynamic sprite scale based on screen height
+    const ch = gameContainer.clientHeight;
+    const cw = gameContainer.clientWidth;
+    const spriteScale = Math.min(0.45, ch / 900); // Slightly smaller to fit better
+    const spriteY = ch * 0.35; // Lifted more to guarantee clearance of bottom HUD
+
+    // Default Left Shape
+    playerLeftShape = this.add.sprite(cw * 0.25, spriteY, 'voidWeaver');
+    playerLeftShape.setScale(spriteScale).setBlendMode(Phaser.BlendModes.SCREEN);
+    
+    // Default Right Shape
+    playerRightShape = this.add.sprite(cw * 0.75, spriteY, 'voidWeaver');
+    playerRightShape.setScale(spriteScale).setFlipX(true).setBlendMode(Phaser.BlendModes.SCREEN);
+
+    // Tweens for idle breathing effect
+    this.tweens.add({
+        targets: [playerLeftShape, playerRightShape],
+        y: '-=15',
+        duration: 2000,
+        yoyo: true,
+        repeat: -1,
+        ease: 'Sine.easeInOut'
+    });
+
+    // Connection is now triggered by the "Play" button, not on create()
+}
+
+function update() {
+    // Real-time animation logic can go here
+}
+
+function connectWebSocket(specificRoomId = null) {
+    if (socket) {
+        try { socket.close(); } catch(e) {}
+    }
+    // Append chosen character class
+    const charId = CHARACTER_CLASSES[selectedCharacterIndex].id;
+    // Connect to Node.js proxy to bypass Firewall issues on Windows
+    let wsUrl = `ws://${window.location.hostname}:8083/play?char=${charId}&uid=${localUid}`;
+    if (specificRoomId) {
+        wsUrl += `&roomId=${specificRoomId}`;
+    }
+    socket = new WebSocket(wsUrl);
+
+    socket.onopen = () => {
+        console.log("Connected to game server");
+        document.getElementById('status-message').innerText = "Connected. Waiting for opponent...";
+    };
+
+    socket.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'STATE_UPDATE') {
+            if (msg.me && !myPlayerId) {
+                myPlayerId = msg.me;
+                console.log("Joined as " + myPlayerId);
+            }
+            gameState = msg.state;
+            updateUI();
+        }
+        if (msg.type === 'EMOTE') {
+            showEmoteBubble(msg.pId, msg.emote);
+            sfx.playEmote();
+        }
+    };
+
+    socket.onerror = (error) => {
+        console.error("WebSocket error observed:", error);
+        document.getElementById('matchmaking-text').innerText = "Connection Failed!";
+    };
+
+    socket.onclose = (event) => {
+        console.log("WebSocket closed", event);
+        if (event.code === 4000) {
+            connectWebSocket();
+            return;
+        }
+
+        if (event.reason === "Opponent disconnected") {
+            // Show custom modal instead of alert
+            document.getElementById('disconnect-modal').classList.remove('hidden');
+            // Hide the normal return button since the modal handles it
+            document.getElementById('btn-return').classList.add('hidden');
+            return;
+        }
+
+        document.getElementById('matchmaking-text').innerText = "Disconnected from server.";
+        document.getElementById('status-message').innerText = "Disconnected from server.";
+        
+        // Hide abilities and show return on generic disconnect
+        document.getElementById('ability-bar').classList.add('hidden');
+        document.getElementById('btn-return').classList.remove('hidden');
+    };
+}
+
+function updateUI() {
+    // Hide Main Menu and ALL modals if game started
+    if (gameState.status === 'IN_PROGRESS') {
+        document.getElementById('matchmaking-overlay').classList.add('hidden');
+        document.getElementById('main-menu-container').classList.add('hidden');
+        
+        // Hide every modal just in case
+        ['play-mode-modal', 'private-match-container', 'social-container', 'profile-container', 'character-menu-container', 'leaderboard-container', 'changelog-modal', 'settings-container'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.classList.add('hidden');
+        });
+
+        document.getElementById('ui-container').classList.remove('hidden');
+        document.getElementById('emote-bar').classList.remove('hidden');
+        renderEmoteBar();
+    } else if (gameState.status === 'WAITING_FOR_PLAYERS' && myPlayerId) {
+        // We connected but are waiting
+        document.getElementById('matchmaking-text').innerText = "Waiting for Opponent...";
+        document.getElementById('ui-container').classList.add('hidden');
+    }
+
+    // Update Health Bars & Animations
+    if (gameState.status === 'IN_PROGRESS' && myPlayerId) {
+        const opponentId = myPlayerId === 'p1' ? 'p2' : 'p1';
+
+        const myPlayer = gameState.players[myPlayerId];
+        const oppPlayer = gameState.players[opponentId];
+
+        // Self (Left)
+        const myHpPct = (myPlayer.health / myPlayer.maxHealth) * 100;
+        document.getElementById('hp-left').style.width = `${Math.max(0, myHpPct)}%`;
+
+        document.getElementById('name-left').innerText = `${myUsername} (${myPlayer.class})`;
+        if (playerLeftShape && myPlayer.classId && playerLeftShape.texture.key !== myPlayer.classId) {
+            playerLeftShape.setTexture(myPlayer.classId);
+        }
+
+        if (prevMyHealth !== -1 && myPlayer.health < prevMyHealth && playerLeftShape) {
+            game.scene.scenes[0].tweens.add({ targets: playerLeftShape, x: '+=10', yoyo: true, duration: 50, repeat: 3 });
+            playerLeftShape.setTintFill(0xff0000);
+            setTimeout(() => playerLeftShape.clearTint(), 200);
+            sfx.playHit();
+            
+            if (playerRightShape) { 
+                game.scene.scenes[0].tweens.add({ targets: playerRightShape, x: '-=50', duration: 150, yoyo: true });
+            }
+        }
+        prevMyHealth = myPlayer.health;
+
+        // Opponent (Right)
+        const oppHpPct = (oppPlayer.health / oppPlayer.maxHealth) * 100;
+        document.getElementById('hp-right').style.width = `${Math.max(0, oppHpPct)}%`;
+
+        document.getElementById('name-right').innerText = `${oppPlayer.username || 'Opponent'} (${oppPlayer.class})`;
+        if (playerRightShape && oppPlayer.classId && playerRightShape.texture.key !== oppPlayer.classId) {
+            playerRightShape.setTexture(oppPlayer.classId);
+        }
+
+        if (prevOpponentHealth !== -1 && oppPlayer.health < prevOpponentHealth && playerRightShape) {
+            game.scene.scenes[0].tweens.add({ targets: playerRightShape, x: '-=10', yoyo: true, duration: 50, repeat: 3 });
+            playerRightShape.setTintFill(0xff0000);
+            setTimeout(() => playerRightShape.clearTint(), 200);
+            sfx.playHit();
+            
+            if (playerLeftShape) {
+                game.scene.scenes[0].tweens.add({ targets: playerLeftShape, x: '+=50', duration: 150, yoyo: true });
+            }
+        }
+        prevOpponentHealth = oppPlayer.health;
+    }
+
+    if (gameState.status === 'WAITING_FOR_PLAYERS') {
+        document.getElementById('status-message').innerText = "Waiting for opponent...";
+        document.getElementById('turn-timer').classList.add('hidden');
+        document.querySelectorAll('.ability-btn').forEach(b => b.disabled = true);
+    } else if (gameState.status === 'IN_PROGRESS') {
+        const isMyTurn = (myPlayerId === 'p1' && gameState.turn === 0) || (myPlayerId === 'p2' && gameState.turn === 1);
+        
+        document.getElementById('status-message').innerText = isMyTurn ? "Your Turn!" : "Opponent's Turn...";
+        
+        document.getElementById('ability-bar').classList.remove('hidden');
+        document.getElementById('btn-return').classList.add('hidden');
+
+        // Update ability buttons
+        const myPlayer = gameState.players[myPlayerId];
+        if (myPlayer && myPlayer.abilities) {
+            document.querySelectorAll('.ability-btn').forEach((btn, i) => {
+                const ab = myPlayer.abilities[i];
+                if (!ab) return;
+                btn.querySelector('.ability-name').innerText = ab.name;
+                if (ab.currentCd > 0) {
+                    btn.disabled = true;
+                    btn.classList.add('on-cooldown');
+                    btn.querySelector('.ability-cd').innerText = `${ab.currentCd} turns`;
+                    btn.querySelector('.ability-cd').classList.remove('hidden');
+                } else {
+                    btn.disabled = !isMyTurn;
+                    btn.classList.remove('on-cooldown');
+                    btn.querySelector('.ability-cd').classList.add('hidden');
+                }
+            });
+        }
+
+        // Update status indicators (shield/dodge badges)
+        const oppId = myPlayerId === 'p1' ? 'p2' : 'p1';
+        function renderStatusBadges(player, elId) {
+            const el = document.getElementById(elId);
+            el.innerHTML = '';
+            if (player.shield && player.shield.active) {
+                el.innerHTML += `<span class="status-badge shield">🛡 ${player.shield.percent}%</span>`;
+            }
+            if (player.dodge) {
+                el.innerHTML += `<span class="status-badge dodge">⚡ Dodge</span>`;
+            }
+        }
+        if (myPlayer) renderStatusBadges(myPlayer, 'status-left');
+        if (gameState.players[oppId]) renderStatusBadges(gameState.players[oppId], 'status-right');
+
+        // Turn timer
+        if (gameState.turnDeadline) {
+            document.getElementById('turn-timer').classList.remove('hidden');
+            updateTurnTimer();
+        }
+
+        // Highlight active player HUD
+        document.getElementById('hud-left').classList.toggle('active-turn', isMyTurn);
+        document.getElementById('hud-right').classList.toggle('active-turn', !isMyTurn);
+    } else if (gameState.status === 'GAME_OVER') {
+        let winnerMsg = "Game Over - Draw";
+        const myPlayer = gameState.players[myPlayerId];
+        const oppPlayer = gameState.players[myPlayerId === 'p1' ? 'p2' : 'p1'];
+        if (myPlayer && oppPlayer) {
+            if (myPlayer.health > 0 && oppPlayer.health <= 0) winnerMsg = "You Win!";
+            if (oppPlayer.health > 0 && myPlayer.health <= 0) winnerMsg = "You Lose!";
+        }
+
+        document.getElementById('status-message').innerText = winnerMsg;
+        document.getElementById('ability-bar').classList.add('hidden');
+        document.getElementById('emote-bar').classList.add('hidden');
+        document.getElementById('turn-timer').classList.add('hidden');
+        document.getElementById('btn-return').classList.remove('hidden');
+
+        // Play game-over sound once
+        if (myPlayer && oppPlayer) {
+            const iWon = myPlayer.health > 0 && oppPlayer.health <= 0;
+            sfx.playGameOver(iWon);
+        }
+    }
+}
+
+// Turn timer client-side display
+let timerInterval = null;
+function updateTurnTimer() {
+    if (timerInterval) clearInterval(timerInterval);
+    timerInterval = setInterval(() => {
+        if (!gameState || !gameState.turnDeadline || gameState.status !== 'IN_PROGRESS') {
+            clearInterval(timerInterval);
+            return;
+        }
+        const remaining = Math.max(0, gameState.turnDeadline - Date.now());
+        const pct = (remaining / 15000) * 100;
+        document.getElementById('timer-bar').style.setProperty('--timer-pct', `${pct}%`);
+        document.getElementById('timer-text').innerText = `${Math.ceil(remaining / 1000)}s`;
+    }, 200);
+}
+
+// Main Menu Events
+document.getElementById('btn-character').addEventListener('click', () => {
+    document.getElementById('character-menu-container').classList.remove('hidden');
+});
+
+document.getElementById('btn-close-char-menu').addEventListener('click', () => {
+    document.getElementById('character-menu-container').classList.add('hidden');
+});
+
+document.getElementById('btn-play-game').addEventListener('click', () => {
+    document.getElementById('play-mode-modal').classList.remove('hidden');
+});
+
+document.getElementById('btn-close-play-mode').addEventListener('click', () => {
+    document.getElementById('play-mode-modal').classList.add('hidden');
+});
+
+document.getElementById('btn-quick-match').addEventListener('click', () => {
+    document.getElementById('play-mode-modal').classList.add('hidden');
+    document.getElementById('matchmaking-overlay').classList.remove('hidden');
+    document.getElementById('matchmaking-text').innerText = "Connecting to Server...";
+    connectWebSocket();
+});
+
+document.getElementById('btn-private-choice').addEventListener('click', () => {
+    document.getElementById('play-mode-modal').classList.add('hidden');
+    document.getElementById('private-match-container').classList.remove('hidden');
+});
+
+document.querySelectorAll('.char-card').forEach(card => {
+    card.addEventListener('click', (e) => {
+        // Clear selection
+        document.querySelectorAll('.char-card').forEach(c => c.classList.remove('selected-card'));
+        // Add to clicked card
+        e.currentTarget.classList.add('selected-card');
+        
+        selectedCharacterIndex = parseInt(e.currentTarget.dataset.index);
+        updateCharacterMenu();
+    });
+});
+
+// Username editing
+document.getElementById('btn-edit-username').addEventListener('click', () => {
+    document.getElementById('username-display').classList.add('hidden');
+    document.getElementById('username-editor').classList.remove('hidden');
+    document.getElementById('input-username').value = myUsername;
+    document.getElementById('input-username').focus();
+    document.getElementById('username-error').classList.add('hidden');
+});
+
+document.getElementById('btn-save-username').addEventListener('click', async () => {
+    const newName = document.getElementById('input-username').value.trim();
+    const errorEl = document.getElementById('username-error');
+    errorEl.classList.add('hidden');
+
+    if (newName.length < 3 || newName.length > 16) {
+        errorEl.innerText = '3-16 characters required';
+        errorEl.classList.remove('hidden');
+        return;
+    }
+
+    try {
+        const res = await fetch(`/set-username`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, username: newName })
+        });
+        const data = await res.json();
+        if (data.ok) {
+            myUsername = data.username;
+            document.getElementById('profile-username').innerText = data.username;
+            document.getElementById('username-editor').classList.add('hidden');
+            document.getElementById('username-display').classList.remove('hidden');
+        } else {
+            errorEl.innerText = data.error || 'Failed to save';
+            errorEl.classList.remove('hidden');
+        }
+    } catch (e) {
+        errorEl.innerText = 'Connection error';
+        errorEl.classList.remove('hidden');
+    }
+});
+
+function updateCharacterMenu() {
+    const char = CHARACTER_CLASSES[selectedCharacterIndex];
+    document.getElementById('menu-char-name').innerText = char.name;
+    document.getElementById('menu-char-stats').innerHTML = char.stats;
+
+    if (playerLeftShape) {
+        playerLeftShape.setTexture(char.id);
+    }
+}
+
+// Social Button
+document.getElementById('btn-social').addEventListener('click', () => {
+    document.getElementById('social-container').classList.remove('hidden');
+    fetchFriends();
+});
+
+document.getElementById('btn-close-social').addEventListener('click', () => {
+    document.getElementById('social-container').classList.add('hidden');
+});
+
+async function fetchFriends(silent = false) {
+    if (!silent) document.getElementById('friends-list').innerHTML = '<div style="padding: 20px; text-align: center; color: #888;">Updating social...</div>';
+    try {
+        const res = await fetch(`/friends-status?uid=${localUid}`);
+        const data = await res.json();
+        updateSocialUI(data);
+    } catch (e) {}
+}
+
+function updateSocialUI(data) {
+    if (!data) return;
+    const friends = data.friends || [];
+    const requests = data.requests || [];
+    
+    document.getElementById('friends-count').innerText = `${friends.length}/100`;
+
+    // Update notification dot
+    const dot = document.getElementById('social-dot');
+    if (requests.length > 0) dot.classList.remove('hidden');
+    else dot.classList.add('hidden');
+
+    // Only update the list if the container is open
+    const isSocialOpen = !document.getElementById('social-container').classList.contains('hidden');
+    if (!isSocialOpen) return;
+
+    const list = document.getElementById('friends-list');
+    let html = '';
+
+    // Pending Requests Section
+    if (requests.length > 0) {
+        html += `<div style="background: rgba(255, 255, 255, 0.05); padding: 10px; font-weight: bold; font-size: 0.9rem; color: #00d2ff; margin-bottom: 5px;">Pending Requests (${requests.length})</div>`;
+        requests.forEach(r => {
+            html += `
+                <div style="padding: 10px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: space-between; background: rgba(0, 210, 255, 0.05);">
+                    <div>
+                        <div style="font-weight: bold; color: #eee;">${r.username}</div>
+                        <div style="font-size: 0.75rem; color: #888;">Level ${r.level}</div>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button onclick="acceptFriend('${r.uid}')" style="background: #00ffcc; border: none; color: #000; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer; font-weight: bold;">Accept</button>
+                        <button onclick="declineFriend('${r.uid}')" style="background: #ff4444; border: none; color: #fff; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer;">Decline</button>
+                    </div>
+                </div>
+            `;
+        });
+        html += '<div style="height: 15px;"></div>';
+    }
+
+    // Friends Section
+    if (friends.length === 0 && requests.length === 0) {
+        list.innerHTML = '<div style="padding: 20px; text-align: center; color: #888;">No friends yet. Add some to play together!</div>';
+        return;
+    }
+
+    if (friends.length > 0) {
+        html += `<div style="padding: 5px 10px; font-weight: bold; font-size: 0.9rem; opacity: 0.7;">My Friends</div>`;
+        friends.forEach(f => {
+            const statusColor = f.status === 'Online' ? '#00ffcc' : '#666';
+            html += `
+                <div style="padding: 12px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: space-between;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <div style="width: 10px; height: 10px; border-radius: 50%; background: ${statusColor}; box-shadow: 0 0 5px ${statusColor};"></div>
+                        <div>
+                            <div style="font-weight: bold; color: #eee;">${f.username}</div>
+                            <div style="font-size: 0.75rem; color: #888;">Level ${f.level}</div>
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button onclick="removeFriend('${f.uid}')" style="background: none; border: none; color: #ff0055; opacity: 0.5; cursor: pointer; font-size: 0.8rem; padding: 5px;">Remove</button>
+                    </div>
+                </div>
+            `;
+        });
+    } else if (friends.length === 0 && requests.length > 0) {
+        html += '<div style="padding: 20px; text-align: center; color: #666; font-size: 0.9rem;">No active friends yet.</div>';
+    }
+    list.innerHTML = html;
+}
+
+window.acceptFriend = async (friendUid) => {
+    try {
+        const res = await fetch('/accept-friend', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, friendUid })
+        });
+        fetchFriends();
+    } catch (e) {}
+};
+
+window.declineFriend = async (friendUid) => {
+    try {
+        await fetch('/decline-friend', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, friendUid })
+        });
+        fetchFriends();
+    } catch (e) {}
+};
+
+document.getElementById('btn-add-friend').addEventListener('click', async () => {
+    const name = document.getElementById('input-friend-name').value.trim();
+    if (!name) return;
+    
+    const errorEl = document.getElementById('social-error');
+    errorEl.classList.add('hidden');
+    errorEl.style.color = '#ff4444';
+
+    try {
+        const res = await fetch('/add-friend', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, friendName: name })
+        });
+        const data = await res.json();
+        if (data.ok) {
+            document.getElementById('input-friend-name').value = '';
+            errorEl.innerText = 'Request sent!';
+            errorEl.style.color = '#00ffcc';
+            errorEl.classList.remove('hidden');
+            setTimeout(() => errorEl.classList.add('hidden'), 3000);
+            fetchFriends();
+        } else {
+            errorEl.innerText = data.error || 'Failed to add friend';
+            errorEl.classList.remove('hidden');
+        }
+    } catch (e) {
+        errorEl.innerText = 'Connection error';
+        errorEl.classList.remove('hidden');
+    }
+});
+
+window.removeFriend = async (friendUid) => {
+    if (!confirm('Are you sure you want to remove this friend?')) return;
+    try {
+        await fetch('/remove-friend', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, friendUid })
+        });
+        fetchFriends();
+    } catch (e) {}
+};
+
+// Private Match UI
+document.getElementById('btn-close-private').addEventListener('click', () => {
+    const choiceView = document.getElementById('private-choice-view');
+    if (choiceView.classList.contains('hidden')) {
+        // Go back to choice sub-view
+        document.getElementById('private-host-view').classList.add('hidden');
+        document.getElementById('private-join-view').classList.add('hidden');
+        choiceView.classList.remove('hidden');
+    } else {
+        // Close entire modal and go back to play mode selection
+        document.getElementById('private-match-container').classList.add('hidden');
+        document.getElementById('play-mode-modal').classList.remove('hidden');
+    }
+});
+
+document.getElementById('btn-host-choice').addEventListener('click', async () => {
+    const btn = document.getElementById('btn-host-choice');
+    btn.disabled = true;
+    btn.innerText = 'Initializing Room...';
+    
+    try {
+        const res = await fetch('/create-private');
+        const data = await res.json();
+        if (data.roomId && data.code) {
+            document.getElementById('private-room-code').innerText = data.code;
+            
+            // Switch views
+            document.getElementById('private-choice-view').classList.add('hidden');
+            document.getElementById('private-host-view').classList.remove('hidden');
+            
+            // Host joins the room automatically
+            connectWebSocket(data.roomId);
+        }
+    } catch (e) {
+        alert('Failed to create private match');
+    } finally {
+        btn.disabled = false;
+        btn.innerText = 'Host New Match';
+    }
+});
+
+document.getElementById('btn-join-choice').addEventListener('click', () => {
+    document.getElementById('private-choice-view').classList.add('hidden');
+    document.getElementById('private-join-view').classList.remove('hidden');
+    document.getElementById('input-private-code').focus();
+});
+
+document.getElementById('btn-submit-join').addEventListener('click', async () => {
+    const code = document.getElementById('input-private-code').value.trim();
+    if (code.length < 6) return;
+    
+    document.getElementById('btn-submit-join').disabled = true;
+    document.getElementById('btn-submit-join').innerText = 'Validating...';
+    
+    try {
+        const res = await fetch(`/join-private?code=${code}`);
+        const data = await res.json();
+        if (data.ok && data.roomId) {
+            // Instant feedback: Hide the private menu and show the matchmaking overlay
+            document.getElementById('private-match-container').classList.add('hidden');
+            document.getElementById('matchmaking-overlay').classList.remove('hidden');
+            document.getElementById('matchmaking-text').innerText = "Joining Battle...";
+            
+            // Join matched room
+            connectWebSocket(data.roomId);
+        } else {
+            alert(data.error || 'Invalid code');
+        }
+    } catch (e) {
+        alert('Connection error');
+    } finally {
+        document.getElementById('btn-submit-join').disabled = false;
+        document.getElementById('btn-submit-join').innerText = 'Join Battle';
+    }
+});
+
+// Ability bar click handler
+document.querySelectorAll('.ability-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            const idx = parseInt(btn.dataset.index);
+            socket.send(JSON.stringify({ action: 'ability', abilityIndex: idx }));
+            sfx.playAttack();
+            // Quick attack animation
+            if (playerLeftShape && idx <= 1) {
+                game.scene.scenes[0].tweens.add({
+                    targets: playerLeftShape,
+                    x: playerLeftShape.x + 50,
+                    duration: 100,
+                    yoyo: true
+                });
+            }
+        }
+    });
+});
+
+document.getElementById('btn-disconnect-ok').addEventListener('click', () => {
+    document.getElementById('disconnect-modal').classList.add('hidden');
+    document.getElementById('btn-return').click();
+});
+
+document.getElementById('btn-return').addEventListener('click', () => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.close(1000, "User Left Screen");
+    }
+
+    // Reset DOM
+    document.getElementById('ui-container').classList.add('hidden');
+    document.getElementById('main-menu-container').classList.remove('hidden');
+    document.getElementById('matchmaking-overlay').classList.add('hidden');
+    
+    // Refresh stats
+    fetchPlayerProfile();
+    document.getElementById('matchmaking-text').innerText = "Connecting to Server...";
+    
+    // Reset ability bar
+    document.getElementById('ability-bar').classList.remove('hidden');
+    document.getElementById('btn-return').classList.add('hidden');
+    document.querySelectorAll('.ability-btn').forEach(btn => {
+        btn.disabled = true;
+        btn.classList.remove('on-cooldown');
+        btn.querySelector('.ability-name').innerText = '---';
+        btn.querySelector('.ability-cd').classList.add('hidden');
+    });
+    document.getElementById('turn-timer').classList.add('hidden');
+    document.getElementById('status-left').innerHTML = '';
+    document.getElementById('status-right').innerHTML = '';
+    if (timerInterval) clearInterval(timerInterval);
+    
+    // Visually reset health bars
+    document.getElementById('hp-left').style.width = '100%';
+    document.getElementById('hp-right').style.width = '100%';
+
+    // Visually reset sprites
+    const resetY = gameContainer.clientHeight * 0.35;
+    const resetScale = Math.min(0.45, gameContainer.clientHeight / 900);
+    if (playerLeftShape) playerLeftShape.setPosition(gameContainer.clientWidth * 0.25, resetY).setScale(resetScale).clearTint();
+    if (playerRightShape) playerRightShape.setPosition(gameContainer.clientWidth * 0.75, resetY).setScale(resetScale).clearTint();
+
+    // Reset multiplayer state
+    myPlayerId = null;
+    gameState = null;
+    prevMyHealth = -1;
+    prevOpponentHealth = -1;
+});
+
+// Leaderboard UI logic
+document.getElementById('btn-leaderboard').addEventListener('click', () => {
+    document.getElementById('leaderboard-container').classList.remove('hidden');
+    fetchLeaderboard();
+});
+
+document.getElementById('btn-close-leaderboard').addEventListener('click', () => {
+    document.getElementById('leaderboard-container').classList.add('hidden');
+});
+
+async function fetchLeaderboard(silent = false) {
+    if (!silent) document.getElementById('leaderboard-list').innerHTML = '<div style="padding: 20px; text-align: center; color: #888;">Loading leaderboard...</div>';
+    try {
+        const res = await fetch(`/leaderboard`);
+        const data = await res.json();
+        updateLeaderboardUI(data);
+    } catch (e) {}
+}
+
+function updateLeaderboardUI(data) {
+    if (!data) return;
+    const isLeaderboardOpen = !document.getElementById('leaderboard-container').classList.contains('hidden');
+    if (!isLeaderboardOpen) return;
+
+    const list = document.getElementById('leaderboard-list');
+    if (data.length === 0) {
+        list.innerHTML = '<div style="padding: 20px; text-align: center; color: #888;">No ranked players yet. Go win a match!</div>';
+        return;
+    }
+
+    list.innerHTML = data.map((player, index) => {
+        let rankClass = '';
+        let rankIcon = index + 1;
+        if (index === 0) { rankClass = 'rank-1'; rankIcon = '🥇'; }
+        else if (index === 1) { rankClass = 'rank-2'; rankIcon = '🥈'; }
+        else if (index === 2) { rankClass = 'rank-3'; rankIcon = '🥉'; }
+
+        return `
+            <div class="leaderboard-row ${rankClass}">
+                <div class="lb-rank">${rankIcon}</div>
+                <div class="lb-player">${player.username}</div>
+                <div class="lb-level">Lvl ${player.level}</div>
+                <div class="lb-wins">${player.wins} W</div>
+            </div>
+        `;
+    }).join('');
+}
+
+// Window resize handling for Phaser canvas
+window.addEventListener('resize', () => {
+    const cw = gameContainer.clientWidth;
+    const ch = gameContainer.clientHeight;
+    if (game.scale) {
+        game.scale.resize(cw, ch);
+    }
+    const resizeY = ch * 0.35;
+    const resizeScale = Math.min(0.45, ch / 900);
+    if (playerLeftShape) {
+        playerLeftShape.setPosition(cw * 0.25, resizeY);
+        playerLeftShape.setScale(resizeScale);
+    }
+    if (playerRightShape) {
+        playerRightShape.setPosition(cw * 0.75, resizeY);
+        playerRightShape.setScale(resizeScale);
+    }
+});
+
+// Settings & Profile UI Logic
+document.getElementById('btn-profile').addEventListener('click', () => {
+    document.getElementById('profile-container').classList.remove('hidden');
+    fetchPlayerProfile();
+});
+document.getElementById('btn-close-profile').addEventListener('click', () => {
+    document.getElementById('profile-container').classList.add('hidden');
+});
+
+document.getElementById('btn-settings').addEventListener('click', () => {
+    document.getElementById('settings-container').classList.remove('hidden');
+});
+document.getElementById('btn-close-settings').addEventListener('click', () => {
+    document.getElementById('settings-container').classList.add('hidden');
+});
+
+document.getElementById('btn-wipe-data').addEventListener('click', () => {
+    if (confirm("⚠️ Are you absolutely sure you want to delete all your save data? This will reset your progress, wins, and unlocks. This cannot be undone.")) {
+        localStorage.removeItem('lumen_clash_uid');
+        window.location.reload();
+    }
+});
+
+document.getElementById('btn-view-changelog').addEventListener('click', async () => {
+    document.getElementById('changelog-modal').classList.remove('hidden');
+    const contentDiv = document.getElementById('changelog-content');
+    contentDiv.innerText = "Loading changelog...";
+    try {
+        const res = await fetch(`http://${window.location.hostname}:8083/changelog`);
+        if (!res.ok) throw new Error("Changelog not found");
+        const text = await res.text();
+        contentDiv.innerText = text; // Just raw text for now until a markdown parser is used
+    } catch(e) {
+        contentDiv.innerText = "Failed to load changelog. Make sure the local server is running.";
+    }
+});
+
+document.getElementById('btn-close-changelog').addEventListener('click', () => {
+    document.getElementById('changelog-modal').classList.add('hidden');
+});
+
+// Click outside background to close modals
+const UI_MODALS = [
+    { container: 'character-menu-container', closeBtn: 'btn-close-char-menu' },
+    { container: 'profile-container', closeBtn: 'btn-close-profile' },
+    { container: 'settings-container', closeBtn: 'btn-close-settings' },
+    { container: 'leaderboard-container', closeBtn: 'btn-close-leaderboard' },
+    { container: 'changelog-modal', closeBtn: 'btn-close-changelog' },
+    { container: 'emote-presets-modal', closeBtn: 'btn-close-emote-presets' }
+];
+
+UI_MODALS.forEach(modal => {
+    const el = document.getElementById(modal.container);
+    if (el) {
+        el.addEventListener('click', (e) => {
+            // Close if clicking directly on the container background
+            if (e.target.id === modal.container) {
+                document.getElementById(modal.closeBtn).click();
+            }
+        });
+    }
+});
+
+// ============================================================
+// FLOATING EMOTE BUBBLE
+// ============================================================
+function showEmoteBubble(pId, emote) {
+    // Decide which side: my player = left, opponent = right
+    const isMe = pId === myPlayerId;
+    const bubbleId = isMe ? 'emote-bubble-left' : 'emote-bubble-right';
+    const el = document.getElementById(bubbleId);
+    if (!el) return;
+    el.innerText = emote;
+    el.classList.remove('hidden');
+    // Re-trigger animation
+    el.style.animation = 'none';
+    void el.offsetHeight; // force reflow
+    el.style.animation = '';
+    setTimeout(() => el.classList.add('hidden'), 2100);
+}
+
+// ============================================================
+// IN-GAME EMOTE BAR
+// ============================================================
+function renderEmoteBar() {
+    const bar = document.getElementById('emote-bar');
+    if (!bar) return;
+    bar.innerHTML = '';
+    activeEmotes.forEach(emote => {
+        const btn = document.createElement('button');
+        btn.className = 'emote-btn';
+        btn.innerText = emote;
+        btn.title = `Send ${emote}`;
+        btn.addEventListener('click', () => {
+            if (emoteCooldown) return;
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ action: 'emote', emote }));
+                sfx.playClick();
+                emoteCooldown = true;
+                bar.querySelectorAll('.emote-btn').forEach(b => b.classList.add('on-cooldown'));
+                setTimeout(() => {
+                    emoteCooldown = false;
+                    bar.querySelectorAll('.emote-btn').forEach(b => b.classList.remove('on-cooldown'));
+                }, 3000); // 3s cooldown between emotes
+            }
+        });
+        bar.appendChild(btn);
+    });
+}
+
+// ============================================================
+// SOUND SETTINGS TOGGLE
+// ============================================================
+function updateSoundBtn() {
+    const btn = document.getElementById('btn-sound-settings');
+    if (btn) btn.innerText = sfx.enabled ? '\ud83d\udd0a Sound: ON' : '\ud83d\udd07 Sound: OFF';
+}
+updateSoundBtn();
+
+document.getElementById('btn-sound-settings').addEventListener('click', () => {
+    sfx.toggle();
+    updateSoundBtn();
+    sfx.playClick();
+});
+
+// ============================================================
+// EMOTE PRESETS MODAL
+// ============================================================
+let editingSlot = 0; // which slot is currently selected for replacement
+
+function renderEmotePresetsModal() {
+    // Render slots
+    const slotsEl = document.getElementById('emote-slots');
+    slotsEl.innerHTML = '';
+    activeEmotes.forEach((emote, i) => {
+        const slot = document.createElement('div');
+        slot.className = 'emote-slot' + (i === editingSlot ? ' active-slot' : '');
+        slot.innerText = emote;
+        slot.addEventListener('click', () => {
+            editingSlot = i;
+            sfx.playClick();
+            renderEmotePresetsModal();
+        });
+        slotsEl.appendChild(slot);
+    });
+
+    // Render pool
+    const poolEl = document.getElementById('emote-pool');
+    poolEl.innerHTML = '';
+    ALL_EMOTES.forEach(emote => {
+        const btn = document.createElement('button');
+        btn.className = 'emote-pool-btn' + (activeEmotes.includes(emote) ? ' in-use' : '');
+        btn.innerText = emote;
+        btn.addEventListener('click', () => {
+            // Replace the active slot with this emote (swap if already in use)
+            const existingIdx = activeEmotes.indexOf(emote);
+            if (existingIdx !== -1) {
+                // Swap
+                activeEmotes[existingIdx] = activeEmotes[editingSlot];
+            }
+            activeEmotes[editingSlot] = emote;
+            saveEmotePresets(activeEmotes);
+            sfx.playClick();
+            // Advance to next slot
+            editingSlot = (editingSlot + 1) % 4;
+            renderEmotePresetsModal();
+        });
+        poolEl.appendChild(btn);
+    });
+}
+
+document.getElementById('btn-quick-emotes').addEventListener('click', () => {
+    editingSlot = 0;
+    renderEmotePresetsModal();
+    document.getElementById('emote-presets-modal').classList.remove('hidden');
+    sfx.playClick();
+});
+
+document.getElementById('btn-close-emote-presets').addEventListener('click', () => {
+    document.getElementById('emote-presets-modal').classList.add('hidden');
+    saveEmotePresets(activeEmotes);
+    sfx.playClick();
+});
+
+// Add click sound to all major menu buttons
+['btn-play-game','btn-character','btn-leaderboard','btn-profile','btn-settings',
+ 'btn-close-char-menu','btn-close-profile','btn-close-settings','btn-close-leaderboard',
+ 'btn-close-changelog','btn-view-changelog','btn-return','btn-disconnect-ok',
+ 'btn-quick-match','btn-private-choice','btn-close-play-mode','btn-close-private',
+ 'btn-host-choice','btn-join-choice','btn-submit-join'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', () => sfx.playClick(), true);
+});

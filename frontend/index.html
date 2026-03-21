@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Lumen Clash</title>
+    
+    <!-- Google Fonts: Outfit (Body) & Rajdhani (Headings/Display) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
+    
+    <link rel="stylesheet" href="css/style.css?v=14">
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+</head>
+<body>
+    <div id="game-container">
+        <!-- Phaser injects canvas here -->
+    </div>
+
+    <!-- MAIN MENU UI -->
+    <div id="main-menu-container">
+        <h1 class="game-title">Lumen Clash</h1>
+        <div class="menu-content">
+            <!-- Profile moved to dedicated modal -->
+            <div class="character-display">
+                <h2>Your Combatant</h2>
+                <div class="char-class" id="menu-char-name">Void Weaver</div>
+                <div class="char-stats" id="menu-char-stats">Assassin Class<br>High Burst / Low Health</div>
+            </div>
+            <div class="menu-buttons" style="display: flex; flex-direction: column; gap: 12px; width: 320px;">
+                <button id="btn-play-game" class="menu-btn" style="width: 100%; margin-bottom: 5px;">Play Game</button>
+                <div style="display: flex; gap: 10px; width: 100%;">
+                    <button id="btn-character" class="menu-btn secondary-btn" style="flex: 1; font-size: 1rem; padding: 10px;">🛡️ Team</button>
+                    <button id="btn-leaderboard" class="menu-btn secondary-btn" style="flex: 1; font-size: 1rem; padding: 10px;">🏆 Rank</button>
+                </div>
+                <div style="display: flex; gap: 10px; width: 100%;">
+                    <button id="btn-profile" class="menu-btn secondary-btn" style="flex: 1; font-size: 1rem; padding: 10px;">👤 Profile</button>
+                    <button id="btn-social" class="menu-btn secondary-btn" style="flex: 1; font-size: 1rem; padding: 10px; background: rgba(255, 0, 204, 0.2); position: relative;">
+                        💞 Social
+                        <div id="social-dot" class="hidden" style="position: absolute; top: -5px; right: -5px; width: 12px; height: 12px; background: #ff0055; border-radius: 50%; box-shadow: 0 0 10px #ff0055; border: 2px solid #000;"></div>
+                    </button>
+                </div>
+                <button id="btn-settings" class="menu-btn secondary-btn" style="width: 100%; font-size: 1rem; padding: 10px;">⚙️ Settings</button>
+            </div>
+        </div>
+        <div id="matchmaking-overlay" class="hidden">
+            <div class="spinner"></div>
+            <h2 id="matchmaking-text">Finding Opponent...</h2>
+        </div>
+    </div>
+
+    <!-- CHARACTER MENU -->
+    <div id="character-menu-container" class="hidden">
+        <h1 class="game-title" style="font-size: 4rem; margin-top: 0;">Roster</h1>
+        <div class="char-roster">
+            <div class="char-card selected-card" data-index="0">
+                <h3>Void Weaver</h3>
+                <p>Assassin Class<br>High Burst / Low Health</p>
+            </div>
+            <div class="char-card" data-index="1">
+                <h3>Aegis Knight</h3>
+                <p>Tank Class<br>High Health / Low Damage</p>
+            </div>
+            <div class="char-card" data-index="2">
+                <h3>Lumen Sage</h3>
+                <p>Mage Class<br>Lowest Health / Epic Burst</p>
+            </div>
+        </div>
+        <button id="btn-close-char-menu" class="menu-btn secondary-btn" style="margin-top: 20px;">Back ↩</button>
+    </div>
+
+    <!-- PROFILE MENU -->
+    <div id="profile-container" class="hidden" style="display: flex; flex-direction: column; align-items: center; justify-content: flex-start; background: rgba(10, 10, 20, 0.8); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 200; padding: 20px; box-sizing: border-box;">
+        <h1 class="game-title" style="font-size: 3rem; margin-top: 10px; margin-bottom: 20px;">Player Profile</h1>
+        
+        <div id="player-profile-card" style="margin-bottom: 20px; width: 90%; max-width: 600px;">
+            <div id="username-display">
+                <span id="profile-username">...</span>
+                <button id="btn-edit-username" class="edit-btn" title="Edit Username">✏️</button>
+            </div>
+            <div id="username-editor" class="hidden">
+                <input type="text" id="input-username" maxlength="16" placeholder="New username...">
+                <button id="btn-save-username" class="save-btn">Save</button>
+                <div id="username-error" class="hidden"></div>
+            </div>
+            <p style="margin-top: 10px;">Level: <span id="profile-level">...</span></p>
+            <div class="xp-bar-bg" style="margin: 5px auto;"><div class="xp-bar-fill" id="profile-xp-fill"></div></div>
+            <p style="font-size:12px; margin-bottom:10px;"><span id="profile-xp-text">0/100</span> XP</p>
+            <p style="font-size:14px; color:#aaa;">Wins: <span id="profile-wins">0</span> | Losses: <span id="profile-losses">0</span></p>
+        </div>
+
+        <div style="width: 90%; max-width: 600px; text-align: left; margin-bottom: 5px; font-weight: bold; color: #4a00e0;">Match History (Last 10)</div>
+        <div id="match-history-list" style="width: 90%; max-width: 600px; flex: 1; max-height: calc(100vh - 350px); overflow-y: auto; background: rgba(20, 20, 40, 0.8); border: 2px solid #4a00e0; border-radius: 8px; margin-bottom: 20px;">
+            <div style="padding: 20px; text-align: center; color: #888;">No matches played yet.</div>
+        </div>
+
+        <button id="btn-close-profile" class="menu-btn secondary-btn" style="width: auto; padding: 8px 30px;">Back ↩</button>
+    </div>
+
+    <!-- SOCIAL / FRIENDS MENU -->
+    <div id="social-container" class="hidden" style="display: flex; flex-direction: column; align-items: center; justify-content: flex-start; background: rgba(10, 10, 20, 0.82); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px); position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 200; padding: 20px; box-sizing: border-box;">
+        <h1 class="game-title" style="font-size: 3rem; margin-top: 10px; margin-bottom: 20px;">Social</h1>
+        
+        <div style="display: flex; gap: 10px; width: 90%; max-width: 600px; margin-bottom: 20px;">
+            <input type="text" id="input-friend-name" placeholder="Friend's username..." style="flex: 1; background: rgba(255,255,255,0.05); border: 1px solid #4a00e0; border-radius: 8px; color: white; padding: 10px; outline: none;">
+            <button id="btn-add-friend" class="action-btn" style="width: auto; padding: 0 20px; margin: 0;">Add</button>
+        </div>
+        <div id="social-error" class="hidden" style="color: #ff4444; font-size: 0.85rem; margin-bottom: 10px;"></div>
+
+        <div style="width: 90%; max-width: 600px; text-align: left; margin-bottom: 5px; font-weight: bold; color: #ff00cc; display: flex; justify-content: space-between;">
+            <span>Friends</span>
+            <span id="friends-count" style="font-size: 0.8rem; opacity: 0.7;">0/100</span>
+        </div>
+        <div id="friends-list" style="width: 90%; max-width: 600px; flex: 1; overflow-y: auto; background: rgba(20, 20, 40, 0.8); border: 2px solid #ff00cc; border-radius: 8px; margin-bottom: 20px;">
+            <div style="padding: 20px; text-align: center; color: #888;">No friends yet. Add some to play together!</div>
+        </div>
+
+        <button id="btn-close-social" class="menu-btn secondary-btn" style="width: auto; padding: 8px 30px;">Back ↩</button>
+    </div>
+
+    <!-- PRIVATE MATCH MENU -->
+    <!-- PRIVATE MATCH MENU -->
+    <div id="private-match-container" class="hidden" style="display: flex; flex-direction: column; align-items: center; justify-content: center; background: rgba(5, 5, 16, 0.95); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px); position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 400; padding: 20px; box-sizing: border-box;">
+        <h2 style="color: #00d2ff; font-size: 2.2rem; margin-bottom: 30px; font-family: 'Rajdhani', sans-serif;">Private Match</h2>
+        
+        <!-- Sub-view 1: Choice -->
+        <div id="private-choice-view" style="display: flex; flex-direction: column; gap: 20px; width: 100%; max-width: 320px;">
+            <button id="btn-host-choice" class="menu-btn" style="background: linear-gradient(45deg, #ff00cc, #4a00e0); border: none; padding: 18px;">Host New Match</button>
+            <button id="btn-join-choice" class="menu-btn secondary-btn" style="border: 2px solid #00d2ff; padding: 18px; color: #00d2ff;">Join with Code</button>
+        </div>
+
+        <!-- Sub-view 2: Hosting -->
+        <div id="private-host-view" class="hidden" style="text-align: center;">
+            <p style="color: #aaa; margin-bottom: 20px;">Share this code with your friend:</p>
+            <div id="private-room-code" style="font-size: 4.5rem; font-weight: bold; color: #ff00cc; letter-spacing: 12px; text-shadow: 0 0 25px rgba(255,0,204,0.5); margin-bottom: 10px; font-family: monospace;">------</div>
+            <div style="display: flex; align-items: center; justify-content: center; gap: 10px; color: #00ffcc; margin-bottom: 30px;">
+                <div class="spinner-small" style="width: 15px; height: 15px; border: 2px solid rgba(0,255,204,0.3); border-top-color: #00ffcc; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
+                <span style="font-size: 0.9rem; letter-spacing: 1px;">WAITING FOR GUEST...</span>
+            </div>
+            <p style="color: #666; font-size: 0.8rem; max-width: 250px;">You will automatically join the battle as soon as your friend enters this code.</p>
+        </div>
+
+        <!-- Sub-view 3: Joining -->
+        <div id="private-join-view" class="hidden" style="text-align: center;">
+            <p style="color: #aaa; margin-bottom: 15px;">Enter the 6-digit code:</p>
+            <input type="text" id="input-private-code" maxlength="6" placeholder="000000" style="background: rgba(255,255,255,0.05); border: 2px solid #00d2ff; border-radius: 12px; color: white; padding: 15px; font-size: 2.2rem; width: 220px; text-align: center; margin-bottom: 25px; outline: none; letter-spacing: 6px; font-family: monospace;">
+            <br>
+            <button id="btn-submit-join" class="action-btn" style="width: auto; padding: 12px 40px; background: linear-gradient(45deg, #00d2ff, #3a7bd5);">Join Battle</button>
+        </div>
+
+        <button id="btn-close-private" class="menu-btn secondary-btn" style="margin-top: 50px; width: auto; padding: 8px 30px; opacity: 0.6;">Back ↩</button>
+    </div>
+
+    <!-- PLAY MODE MODAL -->
+    <div id="play-mode-modal" class="hidden" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 5, 0.9); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 300; padding: 20px; box-sizing: border-box;">
+        <h2 style="color: #00d2ff; font-size: 2.2rem; margin-bottom: 40px; font-family: 'Rajdhani', sans-serif; text-transform: uppercase; letter-spacing: 2px;">Select Battle Mode</h2>
+        
+        <div style="display: flex; flex-direction: column; gap: 20px; width: 100%; max-width: 350px;">
+            <button id="btn-quick-match" class="menu-btn" style="background: linear-gradient(45deg, #4400ff, #00d2ff); border: none; padding: 20px; font-size: 1.4rem;">⚡ Quick Match</button>
+            <button id="btn-private-choice" class="menu-btn secondary-btn" style="background: rgba(255, 0, 204, 0.1); border: 2px solid #ff00cc; padding: 20px; font-size: 1.4rem; color: #ff00cc;">🔑 Private Match</button>
+        </div>
+
+        <button id="btn-close-play-mode" class="menu-btn secondary-btn" style="margin-top: 40px; width: auto; padding: 8px 30px; opacity: 0.7;">Cancel ↩</button>
+    </div>
+
+    <!-- SETTINGS MENU -->
+    <div id="settings-container" class="hidden" style="display: flex; flex-direction: column; align-items: center; justify-content: flex-start; background: rgba(10, 10, 20, 0.8); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 200; padding: 20px; box-sizing: border-box;">
+        <h1 class="game-title" style="font-size: 3rem; margin-top: 10px; margin-bottom: 20px;">Settings</h1>
+        
+        <div style="margin-bottom: 30px; display: flex; flex-direction: column; gap: 12px; width: 90%; max-width: 400px;">
+            <button id="btn-sound-settings" class="action-btn" style="background: #333;">🔊 Sound: ON</button>
+            <button id="btn-emote-presets" class="action-btn" style="background: #333;">🎭 Emote Presets</button>
+            <button id="btn-changelog" class="action-btn" style="background: #333;">📜 View Changelog</button>
+            <button id="btn-wipe-data" class="action-btn" style="background: #600;">🗑️ Wipe Save Data</button>
+        </div>    
+        </div>
+
+        <button id="btn-close-settings" class="menu-btn secondary-btn" style="width: auto; padding: 8px 30px; margin-top: 20px;">Back ↩</button>
+    </div>
+
+    <!-- EMOTE PRESETS MODAL -->
+    <div id="emote-presets-modal" class="hidden" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 5, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 350; padding: 20px; box-sizing: border-box;">
+        <h2 style="color: #00d2ff; font-size: 1.8rem; margin-top: 0; margin-bottom: 10px;">Emote Presets</h2>
+        <p style="color: #aaa; font-size: 0.85rem; margin-bottom: 15px;">Choose 4 quick-use emotes for matches</p>
+        <div id="emote-slots" style="display: flex; gap: 12px; margin-bottom: 20px;"></div>
+        <div id="emote-pool" style="display: flex; flex-wrap: wrap; gap: 10px; max-width: 400px; justify-content: center; margin-bottom: 25px;"></div>
+        <button id="btn-close-emote-presets" class="action-btn" style="background: #444; width: auto; padding: 8px 30px;">Save & Close ↩</button>
+    </div>
+
+    <!-- CHANGELOG MODAL -->
+    <div id="changelog-modal" class="hidden" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 5, 0.8); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); display: flex; flex-direction: column; align-items: center; justify-content: flex-start; z-index: 300; padding: 20px; box-sizing: border-box;">
+        <h2 style="color: #00d2ff; font-size: 1.8rem; margin-top: 10px; margin-bottom: 15px;">Update Notes</h2>
+        <div id="changelog-content" style="width: 95%; max-width: 800px; flex: 1; overflow-y: auto; background: #111; border: 1px solid #444; padding: 15px; border-radius: 8px; color: #ddd; text-align: left; font-size: 0.9rem; font-family: monospace; white-space: pre-wrap; margin-bottom: 20px;">
+        </div>
+        <button id="btn-close-changelog" class="action-btn" style="background: #444; width: auto; padding: 8px 30px; margin-top: 10px;">Back ↩</button>
+    </div>
+
+    <!-- LEADERBOARD MENU -->
+    <div id="leaderboard-container" class="hidden" style="display: flex; flex-direction: column; align-items: center; justify-content: flex-start; background: rgba(10, 10, 20, 0.8); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 200; padding: 20px; box-sizing: border-box;">
+        <h1 class="game-title" style="font-size: 3rem; margin-top: 10px; margin-bottom: 20px;">Global Top 50</h1>
+        
+        <div class="leaderboard-header" style="display: flex; width: 90%; max-width: 600px; padding: 10px 15px; background: rgba(74, 0, 224, 0.5); border-radius: 8px 8px 0 0; font-weight: bold; color: #fff; text-transform: uppercase; font-size: 0.8rem; letter-spacing: 1px;">
+            <div style="flex: 0.5; text-align: center;">Rank</div>
+            <div style="flex: 2; text-align: left; padding-left: 10px;">Player</div>
+            <div style="flex: 1; text-align: center;">Level</div>
+            <div style="flex: 1; text-align: right;">Wins</div>
+        </div>
+
+        <div id="leaderboard-list" style="width: 90%; max-width: 600px; flex: 1; max-height: calc(100vh - 180px); overflow-y: auto; background: rgba(20, 20, 40, 0.8); border: 2px solid #4a00e0; border-top: none; border-radius: 0 0 8px 8px; margin-bottom: 20px;">
+            <!-- Rendered via JS -->
+            <div style="padding: 20px; text-align: center; color: #888;">Loading leaderboard...</div>
+        </div>
+
+        <button id="btn-close-leaderboard" class="menu-btn secondary-btn" style="width: auto; padding: 8px 30px;">Back ↩</button>
+    </div>
+
+    <!-- GAME UI -->
+    <div id="ui-container" class="hidden">
+        <div id="hud-top">
+            <div class="player-hud" id="hud-left">
+                <h2 id="name-left">You (Void Weaver)</h2>
+                <div class="health-bar-bg"><div class="health-bar-fill" id="hp-left"></div></div>
+                <div class="status-indicators" id="status-left"></div>
+            </div>
+            <div id="hud-center">
+                <div id="status-message">Connecting...</div>
+                <div id="turn-timer" class="hidden">
+                    <div id="timer-bar"></div>
+                    <span id="timer-text">15s</span>
+                </div>
+            </div>
+            <div class="player-hud" id="hud-right">
+                <h2 id="name-right">Opponent (Void Weaver)</h2>
+                <div class="health-bar-bg"><div class="health-bar-fill" id="hp-right"></div></div>
+                <div class="status-indicators" id="status-right"></div>
+            </div>
+        </div>
+        <div id="hud-bottom">
+            <div id="emote-bubble-left" class="emote-bubble hidden"></div>
+            <div id="emote-bubble-right" class="emote-bubble hidden"></div>
+            <div id="ability-bar">
+                <button class="ability-btn" data-index="0" disabled>
+                    <span class="ability-name">---</span>
+                    <span class="ability-cd hidden"></span>
+                </button>
+                <button class="ability-btn" data-index="1" disabled>
+                    <span class="ability-name">---</span>
+                    <span class="ability-cd hidden"></span>
+                </button>
+                <button class="ability-btn" data-index="2" disabled>
+                    <span class="ability-name">---</span>
+                    <span class="ability-cd hidden"></span>
+                </button>
+                <button class="ability-btn" data-index="3" disabled>
+                    <span class="ability-name">---</span>
+                    <span class="ability-cd hidden"></span>
+                </button>
+            </div>
+            <div id="emote-bar" class="hidden"></div>
+            <button id="btn-return" class="action-btn hidden" style="background: rgba(255, 255, 255, 0.2);">Return to Menu</button>
+        </div>
+    </div>
+
+    <!-- ROTATE DEVICE OVERLAY (portrait only) -->
+    <div id="rotate-overlay">
+        <div class="rotate-content">
+            <div class="rotate-icon">📱↻</div>
+            <h2>Rotate Your Device</h2>
+            <p>Lumen Clash is best played in landscape mode</p>
+        </div>
+    </div>
+
+    <!-- DISCONNECT MODAL -->
+    <div id="disconnect-modal" class="hidden" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(10, 0, 5, 0.8); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 300;">
+        <div style="background: rgba(20, 20, 40, 0.95); border: 2px solid #ff0055; padding: 30px; border-radius: 12px; text-align: center; box-shadow: 0 0 30px rgba(255, 0, 85, 0.6); max-width: 400px; width: 80%;">
+            <h2 style="color: #ff0055; font-size: 1.8rem; margin-top: 0; margin-bottom: 15px;">Match Ended</h2>
+            <p style="font-size: 1.1rem; color: #ddd; margin-bottom: 25px;">Your opponent has disconnected or forfeited the match.</p>
+            <button id="btn-disconnect-ok" class="action-btn" style="background: linear-gradient(45deg, #ff0055, #ff00aa); border: none;">Return to Menu</button>
+        </div>
+    </div>
+    <script src="js/game.js?v=31"></script>
+</body>
+</html>

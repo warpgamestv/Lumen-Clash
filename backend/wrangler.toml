@@ -1,0 +1,44 @@
+name = "lumen-clash-backend"
+main = "src/index.js"
+compatibility_date = "2024-03-20"
+compatibility_flags = ["nodejs_compat"]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["GameRoom"]
+
+[[migrations]]
+tag = "v2"
+new_classes = ["Matchmaker"]
+
+[[migrations]]
+tag = "v3"
+new_classes = ["PlayerProfile"]
+
+[[migrations]]
+tag = "v4"
+new_classes = ["UsernameRegistry"]
+
+[[migrations]]
+tag = "v5"
+new_classes = ["Leaderboard"]
+
+[[durable_objects.bindings]]
+name = "GAME_ROOM"
+class_name = "GameRoom"
+
+[[durable_objects.bindings]]
+name = "MATCHMAKER"
+class_name = "Matchmaker"
+
+[[durable_objects.bindings]]
+name = "PLAYER_PROFILE"
+class_name = "PlayerProfile"
+
+[[durable_objects.bindings]]
+name = "USERNAME_REGISTRY"
+class_name = "UsernameRegistry"
+
+[[durable_objects.bindings]]
+name = "LEADERBOARD"
+class_name = "Leaderboard"

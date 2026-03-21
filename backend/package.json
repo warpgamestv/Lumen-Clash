@@ -1,0 +1,13 @@
+{
+  "name": "lumen-clash-backend",
+  "version": "1.0.0",
+  "description": "Backend for Lumen Clash",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev --ip 0.0.0.0 --port 8790 --persist-to clean-state",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
