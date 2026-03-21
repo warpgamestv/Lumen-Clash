@@ -1,10 +1,8 @@
-// Phaser Configuration
-const gameContainer = document.getElementById('game-container');
 const config = {
     type: Phaser.AUTO,
     parent: 'game-container',
-    width: gameContainer.clientWidth,
-    height: gameContainer.clientHeight,
+    width: document.getElementById('game-container').clientWidth,
+    height: document.getElementById('game-container').clientHeight,
     backgroundColor: '#050510',
     scene: {
         preload: preload,
@@ -17,7 +15,38 @@ const config = {
     }
 };
 
-const game = new Phaser.Game(config);
+let game = null;
+
+function initGame() {
+    if (game) return; // Already running
+    console.log("[Game] Initializing Phaser Instance");
+    const container = document.getElementById('game-container');
+    if (container) {
+        container.style.display = 'block';
+        container.innerHTML = ''; // Clear previous leftovers
+    }
+    game = new Phaser.Game(config);
+}
+
+function destroyGame() {
+    if (!game) return;
+    console.log("[Game] Nuclear Clear: Destroying Phaser Instance");
+    try {
+        game.destroy(true); // true = remove canvas from DOM
+        game = null;
+        // Specifically clear everything in case destroy() leaves ghosts
+        const container = document.getElementById('game-container');
+        if (container) {
+            container.innerHTML = '';
+            container.style.display = 'none';
+        }
+    } catch (e) {
+        console.error("[Game] Destroy failed", e);
+    }
+}
+
+// Initial boot
+initGame();
 
 let socket;
 let myPlayerId = null;
@@ -137,6 +166,22 @@ class SoundManager {
         this._osc(1200, 0.04, 'sine', 0.05);
         setTimeout(() => this._osc(1500, 0.04, 'sine', 0.05), 50);
     }
+    playLevelUp() {
+        if (!this.enabled) return;
+        this._ensureCtx();
+        const t = this.ctx.currentTime;
+        const notes = [523, 659, 784, 1046]; // C5, E5, G5, C6
+        notes.forEach((f, i) => {
+            const osc = this.ctx.createOscillator();
+            const gain = this.ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(f, t + i * 0.1);
+            gain.gain.setValueAtTime(0.1, t + i * 0.1);
+            gain.gain.exponentialRampToValueAtTime(0.001, t + i * 0.1 + 0.3);
+            osc.connect(gain).connect(this.ctx.destination);
+            osc.start(t + i * 0.1); osc.stop(t + i * 0.1 + 0.4);
+        });
+    }
     playGameOver(won) {
         if (!this.enabled) return;
         this._ensureCtx();
@@ -207,32 +252,47 @@ async function fetchPlayerProfile(silent = false) {
     try {
         const res = await fetch(`/profile?uid=${localUid}`);
         const data = await res.json();
+        playerProfileData = data;
         myUsername = data.username || 'Player';
         
         document.getElementById('profile-username').innerText = myUsername;
-        document.getElementById('profile-level').innerText = data.level;
+        document.getElementById('profile-level').innerText = data.level; // Account Level
         document.getElementById('profile-wins').innerText = data.wins;
         document.getElementById('profile-losses').innerText = data.losses;
 
+        // Account XP/Level
         const neededXP = data.level * 100;
         const xpPct = (data.xp / (neededXP || 100)) * 100;
         document.getElementById('profile-xp-fill').style.width = `${Math.min(100, xpPct)}%`;
         document.getElementById('profile-xp-text').innerText = `${data.xp}/${neededXP}`;
 
-        // Render match history if profile modal is open
-        const isProfileOpen = !document.getElementById('profile-container').classList.contains('hidden');
-        if (isProfileOpen && data.matchHistory && data.matchHistory.length > 0) {
-            const historyList = document.getElementById('match-history-list');
-            historyList.innerHTML = [...data.matchHistory].reverse().map(m => {
-                const date = new Date(m.timestamp).toLocaleString();
-                return `<div style="padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.1); display: flex; justify-content: space-between;">
-                    <span style="color:${m.result === 'Win' ? '#00d2ff' : '#ff0055'}; font-weight:bold;">${m.result.toUpperCase()}</span>
-                    <span style="color:#aaa; font-size:0.8rem;">+${m.xpEarned} XP</span>
-                    <span style="color:#666; font-size:0.8rem;">${date}</span>
-                </div>`;
-            }).join('');
-        }
+        // Update BP badge on main menu if exists
+        const bpBadge = document.getElementById('bp-account-level-button');
+        if (bpBadge) bpBadge.innerText = `Rank ${data.level}`;
+
+        // Render match history
+        updateMatchHistoryUI(data.matchHistory);
     } catch (e) { console.error('Profile fetch failed', e); }
+}
+
+function updateMatchHistoryUI(history) {
+    if (!history) return;
+    const historyList = document.getElementById('match-history-list');
+    if (!historyList) return;
+    historyList.innerHTML = [...history].reverse().map(m => {
+        const date = new Date(m.timestamp).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+        const charName = CHARACTER_CLASSES.find(c => c.id === m.classId)?.name || 'Unknown';
+        return `<div style="padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; justify-content: space-between; align-items:center;">
+            <div>
+                <span style="color:${m.result === 'Win' ? '#00d2ff' : '#ff0055'}; font-weight:bold;">${m.result.toUpperCase()}</span>
+                <span style="color:#666; font-size:0.75rem; margin-left:10px;">as ${charName}</span>
+            </div>
+            <div style="text-align:right;">
+                <div style="color:#aaa; font-size:0.8rem;">+${m.xpEarned} XP</div>
+                <div style="color:#444; font-size:0.7rem;">${date}</div>
+            </div>
+        </div>`;
+    }).join('');
 }
 
 function updateProfileUI(data) {
@@ -264,19 +324,31 @@ function updateProfileUI(data) {
     }
 }
 fetchPlayerProfile();
-fetchPlayerProfile();
 
 // Character Definitions
 const CHARACTER_CLASSES = [
-    { id: 'voidWeaver', name: 'Void Weaver', stats: 'Assassin Class<br>High Burst / Low Health' },
-    { id: 'aegisKnight', name: 'Aegis Knight', stats: 'Tank Class<br>High Health / Low Damage' },
-    { id: 'lumenSage', name: 'Lumen Sage', stats: 'Mage Class<br>Lowest Health / Epic Burst' }
+    { id: 'aegisKnight', name: 'Knight', hp: 150, atk: 8, stats: 'Tank Class<br>High Health / Modest Damage' },
+    { id: 'lumenSage', name: 'Sage', hp: 80, atk: 25, stats: 'Mage Class<br>Low Health / High Burst' },
+    { id: 'voidWeaver', name: 'Void Weaver', hp: 110, atk: 18, stats: 'Assassin Class<br>Medium Health / High Speed' }
 ];
 let selectedCharacterIndex = 0;
+let playerProfileData = null; // Full data from backend
+let currentPreviewCharId = 'aegisKnight';
+let currentSkinIndex = 0;
+
+const BP_REWARDS = {
+    2: { type: 'emote', id: 'hype', name: '🎈 Hype' },
+    3: { type: 'skin', id: 'verdant', name: 'Verdant' },
+    5: { type: 'title', id: 'warrior', name: 'Warrior' },
+    10: { type: 'skin', id: 'abyssal', name: 'Abyssal' },
+    15: { type: 'title', id: 'grandmaster', name: 'Grandmaster' },
+    20: { type: 'skin', id: 'legend', name: 'Lumen Legend' }
+};
 
 // Phaser Scene functions
 function preload() {
     this.load.image('voidWeaver', 'assets/void_weaver.png?v=2');
+    this.load.image('voidWeaver_green', 'assets/void_weaver_green.png?v=1');
     this.load.image('aegisKnight', 'assets/aegis_knight.png?v=2');
     this.load.image('lumenSage', 'assets/lumen_sage.png?v=2');
 }
@@ -305,8 +377,9 @@ function create() {
     particles.setTexture('dot');
 
     // Dynamic sprite scale based on screen height
-    const ch = gameContainer.clientHeight;
-    const cw = gameContainer.clientWidth;
+    const container = document.getElementById('game-container');
+    const ch = container ? container.clientHeight : 600;
+    const cw = container ? container.clientWidth : 800;
     const spriteScale = Math.min(0.45, ch / 900); // Slightly smaller to fit better
     const spriteY = ch * 0.35; // Lifted more to guarantee clearance of bottom HUD
 
@@ -366,6 +439,12 @@ function connectWebSocket(specificRoomId = null) {
         if (msg.type === 'EMOTE') {
             showEmoteBubble(msg.pId, msg.emote);
             sfx.playEmote();
+        }
+        if (msg.type === 'REMATCH_VOTE') {
+            if (msg.pId !== myPlayerId) {
+                const status = document.getElementById('rematch-status');
+                if (status) status.innerText = 'OPPONENT WANTS A REMATCH!';
+            }
         }
     };
 
@@ -431,18 +510,25 @@ function updateUI() {
         document.getElementById('hp-left').style.width = `${Math.max(0, myHpPct)}%`;
 
         document.getElementById('name-left').innerText = `${myUsername} (${myPlayer.class})`;
-        if (playerLeftShape && myPlayer.classId && playerLeftShape.texture.key !== myPlayer.classId) {
-            playerLeftShape.setTexture(myPlayer.classId);
+        if (playerLeftShape && myPlayer.classId) {
+            let textureKey = myPlayer.classId;
+            if (myPlayer.equippedSkin === 'Verdant' && myPlayer.classId === 'voidWeaver') textureKey = 'voidWeaver_green';
+            if (playerLeftShape.active && playerLeftShape.texture.key !== textureKey) {
+                playerLeftShape.setTexture(textureKey);
+            }
         }
 
-        if (prevMyHealth !== -1 && myPlayer.health < prevMyHealth && playerLeftShape) {
-            game.scene.scenes[0].tweens.add({ targets: playerLeftShape, x: '+=10', yoyo: true, duration: 50, repeat: 3 });
-            playerLeftShape.setTintFill(0xff0000);
-            setTimeout(() => playerLeftShape.clearTint(), 200);
+        if (prevMyHealth !== -1 && myPlayer.health < prevMyHealth && playerLeftShape && playerLeftShape.active && game && game.scene) {
+            const scene = game.scene.scenes[0];
+            if (scene) {
+                scene.tweens.add({ targets: playerLeftShape, x: '+=10', yoyo: true, duration: 50, repeat: 3 });
+                playerLeftShape.setTintFill(0xff0000);
+                setTimeout(() => { if (playerLeftShape && playerLeftShape.active) playerLeftShape.clearTint(); }, 200);
+            }
             sfx.playHit();
             
-            if (playerRightShape) { 
-                game.scene.scenes[0].tweens.add({ targets: playerRightShape, x: '-=50', duration: 150, yoyo: true });
+            if (playerRightShape && playerRightShape.active && scene) { 
+                scene.tweens.add({ targets: playerRightShape, x: '-=50', duration: 150, yoyo: true });
             }
         }
         prevMyHealth = myPlayer.health;
@@ -452,18 +538,25 @@ function updateUI() {
         document.getElementById('hp-right').style.width = `${Math.max(0, oppHpPct)}%`;
 
         document.getElementById('name-right').innerText = `${oppPlayer.username || 'Opponent'} (${oppPlayer.class})`;
-        if (playerRightShape && oppPlayer.classId && playerRightShape.texture.key !== oppPlayer.classId) {
-            playerRightShape.setTexture(oppPlayer.classId);
+        if (playerRightShape && oppPlayer.classId) {
+            let textureKey = oppPlayer.classId;
+            if (oppPlayer.equippedSkin === 'Verdant' && oppPlayer.classId === 'voidWeaver') textureKey = 'voidWeaver_green';
+            if (playerRightShape.active && playerRightShape.texture.key !== textureKey) {
+                playerRightShape.setTexture(textureKey);
+            }
         }
 
-        if (prevOpponentHealth !== -1 && oppPlayer.health < prevOpponentHealth && playerRightShape) {
-            game.scene.scenes[0].tweens.add({ targets: playerRightShape, x: '-=10', yoyo: true, duration: 50, repeat: 3 });
-            playerRightShape.setTintFill(0xff0000);
-            setTimeout(() => playerRightShape.clearTint(), 200);
+        if (prevOpponentHealth !== -1 && oppPlayer.health < prevOpponentHealth && playerRightShape && playerRightShape.active && game && game.scene) {
+            const scene = game.scene.scenes[0];
+            if (scene) {
+                scene.tweens.add({ targets: playerRightShape, x: '-=10', yoyo: true, duration: 50, repeat: 3 });
+                playerRightShape.setTintFill(0xff0000);
+                setTimeout(() => { if (playerRightShape && playerRightShape.active) playerRightShape.clearTint(); }, 200);
+            }
             sfx.playHit();
             
-            if (playerLeftShape) {
-                game.scene.scenes[0].tweens.add({ targets: playerLeftShape, x: '+=50', duration: 150, yoyo: true });
+            if (playerLeftShape && playerLeftShape.active && scene) {
+                scene.tweens.add({ targets: playerLeftShape, x: '+=50', duration: 150, yoyo: true });
             }
         }
         prevOpponentHealth = oppPlayer.health;
@@ -527,24 +620,39 @@ function updateUI() {
         document.getElementById('hud-right').classList.toggle('active-turn', !isMyTurn);
     } else if (gameState.status === 'GAME_OVER') {
         let winnerMsg = "Game Over - Draw";
-        const myPlayer = gameState.players[myPlayerId];
-        const oppPlayer = gameState.players[myPlayerId === 'p1' ? 'p2' : 'p1'];
-        if (myPlayer && oppPlayer) {
-            if (myPlayer.health > 0 && oppPlayer.health <= 0) winnerMsg = "You Win!";
-            if (oppPlayer.health > 0 && myPlayer.health <= 0) winnerMsg = "You Lose!";
+        const me = gameState.players[myPlayerId];
+        const opp = gameState.players[myPlayerId === 'p1' ? 'p2' : 'p1'];
+        if (me && opp) {
+            if (me.health > 0 && opp.health <= 0) winnerMsg = "You Win!";
+            if (opp.health > 0 && me.health <= 0) winnerMsg = "You Lose!";
         }
 
         document.getElementById('status-message').innerText = winnerMsg;
         document.getElementById('ability-bar').classList.add('hidden');
         document.getElementById('emote-bar').classList.add('hidden');
         document.getElementById('turn-timer').classList.add('hidden');
-        document.getElementById('btn-return').classList.remove('hidden');
+
+        // Trigger XP Splash once
+        if (me && me.postGame && !document.getElementById('xp-splash-overlay').classList.contains('active-showing')) {
+            const won = me.health > 0;
+            // The active-showing class ensures we only trigger this ONCE per game completion
+            document.getElementById('xp-splash-overlay').classList.add('active-showing');
+            
+            // GO NUCLEAR: Clear game to prevent click interception
+            destroyGame();
+            
+            showXPSplash(won, me.postGame);
+        }
 
         // Play game-over sound once
-        if (myPlayer && oppPlayer) {
-            const iWon = myPlayer.health > 0 && oppPlayer.health <= 0;
+        if (me && opp && !document.getElementById('xp-splash-overlay').classList.contains('active-showing')) {
+            const iWon = me.health > 0 && opp.health <= 0;
             sfx.playGameOver(iWon);
         }
+    } else {
+        // If not game over, ensure splash is hidden (rematch started or quit)
+        document.getElementById('xp-splash-overlay').classList.add('hidden');
+        document.getElementById('xp-splash-overlay').classList.remove('active-showing');
     }
 }
 
@@ -574,6 +682,7 @@ document.getElementById('btn-close-char-menu').addEventListener('click', () => {
 });
 
 document.getElementById('btn-play-game').addEventListener('click', () => {
+    initGame();
     document.getElementById('play-mode-modal').classList.remove('hidden');
 });
 
@@ -595,15 +704,68 @@ document.getElementById('btn-private-choice').addEventListener('click', () => {
 
 document.querySelectorAll('.char-card').forEach(card => {
     card.addEventListener('click', (e) => {
-        // Clear selection
-        document.querySelectorAll('.char-card').forEach(c => c.classList.remove('selected-card'));
-        // Add to clicked card
-        e.currentTarget.classList.add('selected-card');
+        const charId = card.getAttribute('data-char');
+        selectedCharacterIndex = CHARACTER_CLASSES.findIndex(c => c.id === charId);
         
-        selectedCharacterIndex = parseInt(e.currentTarget.dataset.index);
-        updateCharacterMenu();
+        // Highlight selection
+        document.querySelectorAll('.char-card').forEach(c => c.classList.remove('selected-card'));
+        card.classList.add('selected-card');
+        
+        sfx.playClick();
+        updateMenuCharacterDisplay();
     });
 });
+
+// Customize links inside cards
+document.querySelectorAll('.btn-customize-link').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+        const charId = btn.closest('.char-card').getAttribute('data-char');
+        openCharacterPreview(charId);
+    });
+});
+
+document.getElementById('btn-battle-pass').addEventListener('click', () => {
+    openBattlePass();
+});
+
+document.getElementById('btn-save-customization').addEventListener('click', () => {
+    saveCustomization();
+});
+
+function updateMenuCharacterDisplay() {
+    const char = CHARACTER_CLASSES[selectedCharacterIndex];
+    if (!char) return;
+    document.getElementById('menu-char-name').innerText = char.name;
+    document.getElementById('menu-char-stats').innerHTML = char.stats;
+    
+    // If we have profile data, show the level on the menu too
+    if (playerProfileData && playerProfileData.classes[char.id]) {
+        const pClass = playerProfileData.classes[char.id];
+        document.getElementById('menu-char-name').innerText = `${char.name} (Lv. ${pClass.level})`;
+    }
+}
+
+// Update character card levels/xp from profile
+function updateRosterStats() {
+    if (!playerProfileData) return;
+    document.querySelectorAll('.char-card').forEach(card => {
+        const charId = card.getAttribute('data-char');
+        const pClass = playerProfileData.classes[charId] || { level: 1, xp: 0 };
+        
+        const badge = card.querySelector('.char-level-badge');
+        if (badge) badge.innerText = `Lv. ${pClass.level}`;
+        
+        const fill = card.querySelector('.char-card-xp-bar .fill');
+        if (fill) fill.style.width = `${Math.min(100, pClass.xp)}%`;
+    });
+}
+// Hook into profile fetch
+const oldFetch = fetchPlayerProfile;
+fetchPlayerProfile = async function(silent) {
+    if (typeof oldFetch === 'function') await oldFetch(silent);
+    updateRosterStats();
+    updateMenuCharacterDisplay();
+};
 
 // Username editing
 document.getElementById('btn-edit-username').addEventListener('click', () => {
@@ -917,6 +1079,9 @@ document.getElementById('btn-return').addEventListener('click', () => {
     if (socket && socket.readyState === WebSocket.OPEN) {
         socket.close(1000, "User Left Screen");
     }
+    
+    // Nuclear Clear on Return
+    destroyGame();
 
     // Reset DOM
     document.getElementById('ui-container').classList.add('hidden');
@@ -1041,10 +1206,20 @@ document.getElementById('btn-close-settings').addEventListener('click', () => {
     document.getElementById('settings-container').classList.add('hidden');
 });
 
-document.getElementById('btn-wipe-data').addEventListener('click', () => {
-    if (confirm("⚠️ Are you absolutely sure you want to delete all your save data? This will reset your progress, wins, and unlocks. This cannot be undone.")) {
-        localStorage.removeItem('lumen_clash_uid');
-        window.location.reload();
+document.getElementById('btn-wipe-data').addEventListener('click', async () => {
+    if (confirm("⚠️ Are you sure you want to delete your save data? This will reset your progress and free up your username. This cannot be undone.")) {
+        try {
+            // Call backend to wipe THIS player's data
+            const uid = localStorage.getItem('lumen_clash_uid');
+            if (uid) {
+                await fetch(`/reset-player?uid=${uid}`);
+            }
+            // Clear local UID
+            localStorage.removeItem('lumen_clash_uid');
+            window.location.reload();
+        } catch(e) {
+            alert("Reset failed: " + e.message);
+        }
     }
 });
 
@@ -1073,8 +1248,15 @@ const UI_MODALS = [
     { container: 'settings-container', closeBtn: 'btn-close-settings' },
     { container: 'leaderboard-container', closeBtn: 'btn-close-leaderboard' },
     { container: 'changelog-modal', closeBtn: 'btn-close-changelog' },
-    { container: 'emote-presets-modal', closeBtn: 'btn-close-emote-presets' }
+    { container: 'emote-presets-modal', closeBtn: 'btn-close-emote-presets' },
+    { container: 'battle-pass-modal', closeBtn: 'btn-close-bp' },
+    { container: 'character-preview-modal', closeBtn: 'btn-close-cp' }
 ];
+
+window.closeModal = function(id) {
+    document.getElementById(id).classList.add('hidden');
+    sfx.playClick();
+};
 
 UI_MODALS.forEach(modal => {
     const el = document.getElementById(modal.container);
@@ -1105,6 +1287,309 @@ function showEmoteBubble(pId, emote) {
     el.style.animation = '';
     setTimeout(() => el.classList.add('hidden'), 2100);
 }
+
+
+
+// ============================================================
+// XP SPLASH / REMATCH
+// ============================================================
+// ============================================================
+// BATTLE PASS & CUSTOMIZATION
+// ============================================================
+function openBattlePass() {
+    if (!playerProfileData) return;
+    const track = document.getElementById('bp-track');
+    const rankEl = document.getElementById('bp-account-level');
+    rankEl.innerText = playerProfileData.level;
+    
+    track.innerHTML = '';
+    // Generate nodes for levels 1-20
+    for (let i = 1; i <= 20; i++) {
+        const node = document.createElement('div');
+        node.className = 'bp-node';
+        if (i <= playerProfileData.level) node.classList.add('unlocked');
+        if (i === playerProfileData.level) node.classList.add('current');
+        
+        const reward = BP_REWARDS[i];
+        let icon = '🔒';
+        let name = 'Empty';
+        
+        if (reward) {
+            icon = reward.type === 'emote' ? reward.id : (reward.type === 'title' ? '📜' : '🎨');
+            if (reward.id === 'hype') icon = '🎈';
+            name = reward.name;
+        } else if (i === 1) {
+            icon = '🌱';
+            name = 'Start';
+        }
+
+        node.innerHTML = `
+            <div class="lvl">Lvl ${i}</div>
+            <div class="reward-icon">${icon}</div>
+            <div class="reward-name">${name}</div>
+        `;
+        track.appendChild(node);
+    }
+    
+    document.getElementById('battle-pass-modal').classList.remove('hidden');
+    sfx.playClick();
+}
+
+function openCharacterPreview(charId) {
+    if (!playerProfileData) return;
+    currentPreviewCharId = charId;
+    const char = CHARACTER_CLASSES.find(c => c.id === charId);
+    const pClass = playerProfileData.classes[charId] || { level: 1, xp: 0 };
+    
+    document.getElementById('preview-char-name').innerText = char.name;
+    document.getElementById('preview-char-level').innerText = `Level ${pClass.level}`;
+    
+    // Calculate Upgraded Stats
+    const currentHP = char.hp + (pClass.level - 1) * 10;
+    const currentATK = char.atk + (pClass.level - 1) * 2;
+    
+    document.getElementById('preview-hp-val').innerText = currentHP;
+    document.getElementById('preview-atk-val').innerText = currentATK;
+    
+    // Update Stat Bars (relative to some max, say 300 HP and 50 ATK)
+    document.getElementById('preview-hp-bar').style.width = Math.min(100, (currentHP / 300) * 100) + '%';
+    document.getElementById('preview-atk-bar').style.width = Math.min(100, (currentATK / 50) * 100) + '%';
+    
+    // Fill Titles Select
+    const titleSelect = document.getElementById('select-title');
+    titleSelect.innerHTML = '<option value="">No Title</option>';
+    (playerProfileData.unlockedTitles || []).forEach(title => {
+        const opt = document.createElement('option');
+        opt.value = title;
+        opt.innerText = title;
+        if (playerProfileData.equippedTitle === title) opt.selected = true;
+        titleSelect.appendChild(opt);
+    });
+
+    // Skin Selector Logic
+    updateSkinPreview();
+
+    document.getElementById('character-preview-modal').classList.remove('hidden');
+    sfx.playClick();
+}
+
+function updateSkinPreview() {
+    const skins = ['Default'];
+    if (currentPreviewCharId === 'voidWeaver' && playerProfileData.level >= 3) skins.push('Verdant');
+    if (playerProfileData.level >= 10) skins.push('Abyssal');
+    if (playerProfileData.level >= 20) skins.push('Lumen Legend');
+    
+    const equipped = playerProfileData.equippedSkins[currentPreviewCharId] || 'Default';
+    currentSkinIndex = skins.indexOf(equipped);
+    if (currentSkinIndex === -1) currentSkinIndex = 0;
+
+    document.getElementById('current-skin-name').innerText = skins[currentSkinIndex];
+}
+
+function nextSkin() {
+    const skins = ['Default'];
+    if (currentPreviewCharId === 'voidWeaver' && playerProfileData.level >= 3) skins.push('Verdant');
+    if (playerProfileData.level >= 10) skins.push('Abyssal');
+    if (playerProfileData.level >= 20) skins.push('Lumen Legend');
+    currentSkinIndex = (currentSkinIndex + 1) % skins.length;
+    document.getElementById('current-skin-name').innerText = skins[currentSkinIndex];
+}
+
+function prevSkin() {
+    const skins = ['Default'];
+    if (currentPreviewCharId === 'voidWeaver' && playerProfileData.level >= 3) skins.push('Verdant');
+    if (playerProfileData.level >= 10) skins.push('Abyssal');
+    if (playerProfileData.level >= 20) skins.push('Lumen Legend');
+    currentSkinIndex = (currentSkinIndex - 1 + skins.length) % skins.length;
+    document.getElementById('current-skin-name').innerText = skins[currentSkinIndex];
+}
+
+async function saveCustomization() {
+    const title = document.getElementById('select-title').value;
+    const skinName = document.getElementById('current-skin-name').innerText;
+    
+    try {
+        const res = await fetch('/save-customization', {
+            method: 'POST',
+            body: JSON.stringify({
+                uid: localUid,
+                equippedTitle: title,
+                charId: currentPreviewCharId,
+                skin: skinName
+            })
+        });
+        if (res.ok) {
+            closeModal('character-preview-modal');
+            fetchPlayerProfile(); // Refresh
+        }
+    } catch(e) { console.error("Save failed", e); }
+}
+
+// Global capture-phase click listener to debug obstructions
+window.addEventListener('click', (e) => {
+    console.log("[Global Click Capture] Target:", e.target, "ID:", e.target.id, "Path:", e.composedPath().map(el => el.tagName + (el.id ? '#' + el.id : '')));
+}, true);
+
+// Fail-safe global handlers for Splash Screen
+window.handleSplashExit = function() {
+    console.log("[Splash] Exit clicked");
+    document.getElementById('xp-splash-overlay').classList.add('hidden');
+    document.getElementById('xp-splash-overlay').classList.remove('active-showing');
+    if (socket) socket.close();
+    updateUI(); 
+};
+
+window.handleSplashRematch = function() {
+    console.log("[Splash] Rematch clicked");
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ action: 'rematch' }));
+        const btn = document.getElementById('btn-rematch');
+        if (btn) {
+            btn.innerText = 'Waiting for Opponent...';
+            btn.disabled = true;
+        }
+        if (typeof sfx.playClick === 'function') sfx.playClick();
+        
+        // Restore game for rematch
+        initGame();
+    }
+};
+
+async function showXPSplash(won, pg) {
+    console.group("[Splash] Initialization");
+    console.log("Won:", won);
+    console.log("PostGame Data:", pg);
+    
+    const splash = document.getElementById('xp-splash-overlay');
+    const title = document.getElementById('splash-title');
+    const levelEl = document.getElementById('splash-level');
+    const xpGainedEl = document.getElementById('splash-xp-gained');
+    const xpFill = document.getElementById('splash-xp-fill');
+    const xpDetails = document.getElementById('splash-xp-details');
+    const lvlBurst = document.getElementById('level-up-burst');
+    
+    const bpRankEl = document.getElementById('bp-splash-rank');
+    const bpFill = document.getElementById('bp-splash-fill');
+    const bpDetails = document.getElementById('bp-splash-details');
+    const bpXpGained = document.getElementById('bp-splash-xp-gained');
+
+    if (!splash) {
+        console.error("[Splash] FATAL: Overlay element not found");
+        console.groupEnd();
+        return;
+    }
+
+    // Hide other likely obstructions
+    ['matchmaking-overlay', 'profile-container', 'settings-container', 'character-menu-container', 'disconnect-modal'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.add('hidden');
+    });
+
+    // Reset UI and FORCE pointer events/z-index
+    splash.style.zIndex = "99999"; 
+    splash.style.pointerEvents = "auto";
+    splash.style.display = "flex"; // Ensure visible
+    title.innerText = won ? 'VICTORY' : 'DEFEAT';
+    title.style.color = won ? '#00d2ff' : '#ff0055';
+    xpFill.style.transition = 'none';
+    xpFill.style.width = '0%';
+    bpFill.style.transition = 'none';
+    bpFill.style.width = '0%';
+    lvlBurst.classList.add('hidden');
+    splash.classList.remove('hidden');
+
+    // Enable buttons
+    const btnRematch = document.getElementById('btn-rematch');
+    const btnExit = document.getElementById('btn-splash-exit');
+    if (btnRematch) {
+        btnRematch.disabled = false;
+        btnRematch.innerText = 'Challenge Again';
+        btnRematch.style.pointerEvents = "auto";
+        btnRematch.style.cursor = "pointer";
+    }
+    if (btnExit) {
+        btnExit.style.pointerEvents = "auto";
+        btnExit.style.cursor = "pointer";
+    }
+    const rmStatus = document.getElementById('rematch-status');
+    if (rmStatus) rmStatus.innerText = '';
+
+    // Data handling with defensive aliases
+    try {
+        const classId = pg.lastMatchClassId || pg.classId || 'voidWeaver';
+        console.log("Target ClassId:", classId);
+        
+        const charData = (pg.classes && pg.classes[classId]) || 
+                         (pg.classes && pg.classes['aegisKnight']) || 
+                         { level: 1, xp: 0 };
+        
+        console.log("Target CharData:", charData);
+        
+        const charLevel = charData.level || 1;
+        const charXp = (charData.xp !== undefined) ? charData.xp : 0;
+        const xpGained = pg.xpGained || (won ? 50 : 10);
+        
+        console.log("Calculated: Level", charLevel, "XP", charXp, "Gained", xpGained);
+
+        xpGainedEl.innerText = xpGained;
+        levelEl.innerText = pg.leveledUp ? Math.max(1, charLevel - 1) : charLevel;
+        
+        // Account Level (BP)
+        bpRankEl.innerText = pg.level || 1; 
+        bpXpGained.innerText = `+${xpGained} Account XP`;
+
+        console.groupEnd();
+        // Wait for pop-in animation
+        await new Promise(r => setTimeout(r, 600));
+
+        // Animation: Character Level
+        if (pg.leveledUp) {
+            xpFill.style.transition = 'width 0.8s ease-in';
+            xpFill.style.width = '100%';
+            await new Promise(r => setTimeout(r, 900));
+            lvlBurst.classList.remove('hidden');
+            levelEl.innerText = charLevel;
+            if (typeof sfx.playLevelUp === 'function') sfx.playLevelUp();
+            xpFill.style.transition = 'none';
+            xpFill.style.width = '0%';
+            await new Promise(r => setTimeout(r, 50));
+            xpFill.style.transition = 'width 1.2s cubic-bezier(0.1, 0.5, 0.2, 1)';
+            xpFill.style.width = `${charXp}%`;
+        } else {
+            const startPct = Math.max(0, charXp - xpGained);
+            xpFill.style.width = `${startPct}%`;
+            await new Promise(r => setTimeout(r, 50));
+            xpFill.style.transition = 'width 1.5s cubic-bezier(0.1, 0.5, 0.2, 1)';
+            xpFill.style.width = `${charXp}%`;
+        }
+        xpDetails.innerText = `${charXp} / 100 XP`;
+
+        // BP Animation
+        bpFill.style.transition = 'width 1.5s cubic-bezier(0.1, 0.5, 0.2, 1)';
+        bpFill.style.width = `${charXp}%`;
+        bpDetails.innerText = `Progress tracked to Rank ${(pg.level || 1) + 1}`;
+    } catch (e) {
+        console.error("[Splash] Critical Logic Error", e);
+        console.groupEnd();
+    }
+}
+
+document.getElementById('btn-rematch').addEventListener('click', () => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ action: 'rematch' }));
+        const btn = document.getElementById('btn-rematch');
+        btn.innerText = 'Waiting for Opponent...';
+        btn.disabled = true;
+        sfx.playClick();
+    }
+});
+
+document.getElementById('btn-splash-exit').addEventListener('click', () => {
+    document.getElementById('xp-splash-overlay').classList.add('hidden');
+    document.getElementById('xp-splash-overlay').classList.remove('active-showing');
+    if (socket) socket.close();
+    updateUI();
+});
 
 // ============================================================
 // IN-GAME EMOTE BAR
@@ -1210,11 +1695,12 @@ document.getElementById('btn-close-emote-presets').addEventListener('click', () 
 });
 
 // Add click sound to all major menu buttons
-['btn-play-game','btn-character','btn-leaderboard','btn-profile','btn-settings',
- 'btn-close-char-menu','btn-close-profile','btn-close-settings','btn-close-leaderboard',
- 'btn-close-changelog','btn-view-changelog','btn-return','btn-disconnect-ok',
- 'btn-quick-match','btn-private-choice','btn-close-play-mode','btn-close-private',
- 'btn-host-choice','btn-join-choice','btn-submit-join'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.addEventListener('click', () => sfx.playClick(), true);
-});
+ ['btn-play-game','btn-character','btn-leaderboard','btn-profile','btn-settings',
+  'btn-close-char-menu','btn-close-profile','btn-close-settings','btn-close-leaderboard',
+  'btn-close-changelog','btn-view-changelog','btn-return','btn-disconnect-ok',
+  'btn-quick-match','btn-private-choice','btn-close-play-mode','btn-close-private',
+  'btn-host-choice','btn-join-choice','btn-submit-join','btn-rematch','btn-splash-exit',
+  'btn-battle-pass', 'btn-save-customization'].forEach(id => {
+     const el = document.getElementById(id);
+     if (el) el.addEventListener('click', () => sfx.playClick(), true);
+ });

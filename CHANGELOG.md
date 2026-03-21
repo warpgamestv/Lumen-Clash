@@ -1,5 +1,19 @@
 # Lumen Clash
 
+## v1.0.0 — Luminary Pass & Customization (2026-03-21)
+### Added
+- **Luminary Pass**: A global account progression system with 20 ranks of rewards.
+- **Character Levels**: Per-character XP/leveling (Max Level 100) with permanent stat bonuses (+10 HP, +2 ATK per level).
+- **Customization System**: Equip unlocked Skins and Titles via the new Character Preview menu.
+- **New Skin**: "Verdant" variant for Void Weaver unlocked at Rank 3.
+- **Dynamic Sprites**: In-game characters now reflect your equipped skin variants.
+- **UI Overhaul**: New premium modals for Battle Pass and Character Previews.
+
+### Fixed
+- **Global UI Interactions**: Fixed unresponsive "X" close buttons across all menus by improving z-index and pointer-event layering.
+- **ID Synchronization**: Aligned character metadata between frontend and backend to ensure consistent stat application.
+
+
 ## v0.9.0 — Social & Private Matches (2026-03-21)
 ### Added
 - **Social System**: Mutual friends list with online status tracking.

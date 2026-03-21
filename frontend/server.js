@@ -20,8 +20,8 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    let filePath = '.' + urlNoQuery;
-    if (filePath == './') filePath = './index.html';
+    let filePath = path.join(__dirname, urlNoQuery);
+    if (urlNoQuery === '/') filePath = path.join(__dirname, 'index.html');
 
     const extname = path.extname(filePath);
     let contentType = 'text/html';
@@ -38,7 +38,7 @@ const server = http.createServer((req, res) => {
     fs.readFile(filePath, (err, content) => {
         if (err) {
             // If file not found, check if it's an API route to proxy to 8790
-            const apiRoutes = ['/profile', '/set-username', '/leaderboard', '/add-friend', '/remove-friend', '/friends-status', '/create-private', '/join-private', '/update-presence', '/accept-friend', '/decline-friend', '/lobby-update'];
+            const apiRoutes = ['/profile', '/set-username', '/leaderboard', '/add-friend', '/remove-friend', '/friends-status', '/create-private', '/join-private', '/update-presence', '/accept-friend', '/decline-friend', '/lobby-update', '/system-reset', '/reset-player'];
             if (apiRoutes.some(r => urlNoQuery.startsWith(r))) {
                 const proxyReq = http.request({
                     host: '127.0.0.1',

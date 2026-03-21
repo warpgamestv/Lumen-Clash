@@ -4,6 +4,7 @@ export default {
 
 		if (url.pathname === '/play') {
 			let charId = url.searchParams.get('char') || 'voidWeaver';
+			console.log(`[GameJoin] User: ${url.searchParams.get('uid')} Class: ${charId}`);
 			let playerId = url.searchParams.get('uid') || crypto.randomUUID();
 			let specificRoomId = url.searchParams.get('roomId');
 
@@ -165,6 +166,40 @@ export default {
 			return env.MATCHMAKER.get(mmId).fetch(new Request(`http://internal/join-private?code=${code}`));
 		}
 
+		if (url.pathname === '/system-reset') {
+			const secret = request.headers.get('X-Dev-Secret');
+			if (secret !== 'dev-reset-2026') {
+				return new Response('Unauthorized', { status: 401 });
+			}
+			
+			// Wipe Registry
+			await env.USERNAME_REGISTRY.get(env.USERNAME_REGISTRY.idFromName('global')).fetch(new Request('http://internal/wipe'));
+			// Wipe Leaderboard
+			await env.LEADERBOARD.get(env.LEADERBOARD.idFromName('global')).fetch(new Request('http://internal/wipe'));
+			
+			return new Response(JSON.stringify({ ok: true, msg: 'System wiped.' }), { headers: { 'Content-Type': 'application/json' }});
+		}
+
+		if (url.pathname === '/reset-player') {
+			const uid = url.searchParams.get('uid');
+			if (!uid) return new Response('Missing UID', { status: 400 });
+
+			// 1. Get current username to release it
+			let p = env.PLAYER_PROFILE.get(env.PLAYER_PROFILE.idFromName(uid));
+			let pRes = await p.fetch(new Request('http://internal/get-stats'));
+			let pData = await pRes.json();
+			
+			if (pData.username) {
+				let reg = env.USERNAME_REGISTRY.get(env.USERNAME_REGISTRY.idFromName('global'));
+				await reg.fetch(new Request(`http://internal/release?uid=${uid}&name=${encodeURIComponent(pData.username)}`));
+			}
+
+			// 2. Wipe profile
+			await p.fetch(new Request('http://internal/wipe'));
+			
+			return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' }});
+		}
+
 		return new Response('Lumen Clash API Server', { status: 200, headers: { 'Access-Control-Allow-Origin': '*' } });
 	},
 };
@@ -189,8 +224,36 @@ export class PlayerProfile {
 		const url = new URL(request.url);
 
 		// Initialize default schema if missing
-		let stats = await this.state.storage.get('stats') || { level: 1, xp: 0, wins: 0, losses: 0, username: null, matchHistory: [] };
+		let stats = await this.state.storage.get('stats') || { 
+			level: 1, 
+			xp: 0, 
+			wins: 0, 
+			losses: 0, 
+			username: null, 
+			matchHistory: [],
+			classes: {
+				'aegisKnight': { level: 1, xp: 0 },
+				'lumenSage': { level: 1, xp: 0 },
+				'voidWeaver': { level: 1, xp: 0 }
+			},
+			unlockedCosmetics: [],
+			unlockedTitles: [],
+			equippedTitle: '',
+			equippedSkins: {
+				'aegisKnight': 'Default',
+				'lumenSage': 'Default',
+				'voidWeaver': 'Default'
+			}
+		};
 		stats.matchHistory = stats.matchHistory || [];
+		stats.classes = stats.classes || {
+			'aegisKnight': { level: 1, xp: 0 },
+			'lumenSage': { level: 1, xp: 0 },
+			'voidWeaver': { level: 1, xp: 0 }
+		};
+		stats.unlockedCosmetics = stats.unlockedCosmetics || [];
+		stats.unlockedTitles = stats.unlockedTitles || [];
+		stats.equippedSkins = stats.equippedSkins || {};
 
 		// Generate a random username on first ever access
 		if (!stats.username) {
@@ -219,34 +282,64 @@ export class PlayerProfile {
 
 		if (url.pathname === '/add-xp') {
 			let isWin = url.searchParams.get('win') === 'true';
+			let classId = url.searchParams.get('classId') || 'knight';
 			let xpGained = isWin ? 50 : 10;
-			if (isWin) {
-				stats.wins += 1;
-				stats.xp += xpGained;
-			} else {
-				stats.losses += 1;
-				stats.xp += xpGained;
+			
+			// Update Global Stats
+			if (isWin) stats.wins += 1;
+			else stats.losses += 1;
+			stats.xp += xpGained;
+
+			// Update PER-CLASS Stats
+			if (!stats.classes[classId]) stats.classes[classId] = { level: 1, xp: 0 };
+			let c = stats.classes[classId];
+			c.xp += xpGained;
+			
+			// Per-Character Levelup (100xp curve)
+			let neededXP = c.level * 100;
+			let leveledUp = false;
+			while (c.xp >= neededXP) {
+				c.xp -= neededXP;
+				c.level += 1;
+				neededXP = c.level * 100;
+				leveledUp = true;
+			}
+
+			// Update Account Level (Sum of all class levels)
+			const oldAccountLevel = stats.level;
+			stats.level = Object.values(stats.classes).reduce((acc, obj) => acc + obj.level, 0) - (Object.keys(stats.classes).length - 1);
+
+			// Check Battle Pass Rewards
+			const REWARDS = {
+				2: { type: 'emote', id: 'hype', name: '🎈 Hype' },
+				5: { type: 'title', id: 'warrior', name: 'Warrior' },
+				10: { type: 'skin', id: 'abyssal', name: 'Abyssal' },
+				15: { type: 'title', id: 'grandmaster', name: 'Grandmaster' },
+				20: { type: 'skin', id: 'legend', name: 'Lumen Legend' }
+			};
+
+			for (let lvl = oldAccountLevel + 1; lvl <= stats.level; lvl++) {
+				if (REWARDS[lvl]) {
+					const r = REWARDS[lvl];
+					if (r.type === 'emote') stats.unlockedCosmetics.push(r.id);
+					if (r.type === 'title') stats.unlockedTitles.push(r.name);
+					// Skins are handled specifically later in the equip UI
+				}
 			}
 
 			stats.matchHistory.push({
 				result: isWin ? 'Win' : 'Loss',
+				classId,
 				xpEarned: xpGained,
+				leveledUp,
 				timestamp: Date.now()
 			});
 			if (stats.matchHistory.length > 10) {
 				stats.matchHistory = stats.matchHistory.slice(-10);
 			}
 
-		// Simple leveling curve: Level up every 100 XP
-		let neededXP = stats.level * 100;
-		while (stats.xp >= neededXP) {
-			stats.xp -= neededXP;
-			stats.level += 1;
-			neededXP = stats.level * 100;
-		}
-
-		stats.lastSeen = Date.now();
-		await this.state.storage.put('stats', stats);
+			stats.lastSeen = Date.now();
+			await this.state.storage.put('stats', stats);
 
 			// PUSH TO LEADERBOARD asynchronously (non-blocking)
 			if (isWin && stats.username) {
@@ -265,7 +358,22 @@ export class PlayerProfile {
 				).catch(e => console.error('Leaderboard update failed', e));
 			}
 
-			return new Response('OK', { status: 200 });
+			return new Response(JSON.stringify({
+				...stats,
+				lastMatchClassId: classId,
+				xpGained: xpGained
+			}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+		}
+
+		if (url.pathname === '/save-customization') {
+			let { equippedTitle, charId, skin } = await request.json();
+			if (equippedTitle !== undefined) stats.equippedTitle = equippedTitle;
+			if (charId && skin) {
+				if (!stats.equippedSkins) stats.equippedSkins = {};
+				stats.equippedSkins[charId] = skin;
+			}
+			await this.state.storage.put('stats', stats);
+			return new Response(JSON.stringify({ success: true, stats }));
 		}
 
 		if (url.pathname === '/update-presence') {
@@ -313,6 +421,11 @@ export class PlayerProfile {
 			stats.friends = stats.friends || [];
 			stats.friends = stats.friends.filter(f => f !== target);
 			await this.state.storage.put('stats', stats);
+			return new Response('OK');
+		}
+
+		if (url.pathname === '/wipe') {
+			await this.state.storage.deleteAll();
 			return new Response('OK');
 		}
 
@@ -394,6 +507,19 @@ export class UsernameRegistry {
 			return new Response(JSON.stringify({ ok: true, uid }));
 		}
 
+		if (url.pathname === '/release') {
+			const name = decodeURIComponent(url.searchParams.get('name')).toLowerCase();
+			const uid = url.searchParams.get('uid');
+			await this.state.storage.delete(`name:${name}`);
+			await this.state.storage.delete(`uid:${uid}`);
+			return new Response('OK');
+		}
+
+		if (url.pathname === '/wipe') {
+			await this.state.storage.deleteAll();
+			return new Response('OK');
+		}
+
 		return new Response('Not found', { status: 404 });
 	}
 }
@@ -404,6 +530,7 @@ export class GameRoom {
 		this.env = env;
 		this.sessions = [];
 		this.turnTimer = null;
+		this.rematchVotes = new Set();
 		this.gameState = {
 			status: 'WAITING_FOR_PLAYERS',
 			turn: 0,
@@ -415,6 +542,7 @@ export class GameRoom {
 	getClassData(charId) {
 		switch (charId) {
 			case 'aegisKnight':
+			case 'knight':
 				return {
 					name: 'Aegis Knight', hp: 160,
 					abilities: [
@@ -425,6 +553,7 @@ export class GameRoom {
 					]
 				};
 			case 'lumenSage':
+			case 'sage':
 				return {
 					name: 'Lumen Sage', hp: 80,
 					abilities: [
@@ -435,6 +564,7 @@ export class GameRoom {
 					]
 				};
 			case 'voidWeaver':
+			case 'void_weaver':
 			default:
 				return {
 					name: 'Void Weaver', hp: 100,
@@ -475,6 +605,7 @@ export class GameRoom {
 			// Initialize state if first player (Host in private, or Seeker in public)
 			if (this.sessions.length === 0) {
 				// Safety: If matchmaker thought this was an old room but it's empty, and it's NOT private, reject.
+				// This forces a retry from the client, which usually gets a fresh room.
 				if (!isNew && !isPrivate) {
 					server.close(4000, "Queue Abandoned");
 					return new Response(null, { status: 101, webSocket: client });
@@ -506,6 +637,8 @@ export class GameRoom {
 			id: pId, 
 			health: classData.hp, 
 			maxHealth: classData.hp, 
+			atkBonus: 0,
+			level: 1,
 			class: classData.name,
 			classId: charId,
 			uid: playerId,
@@ -516,18 +649,38 @@ export class GameRoom {
 		};
 		this.sessions.push({ ws: server, id: pId, uid: playerId });
 
-		// Fetch username asynchronously (non-blocking)
+		// Fetch profile data asynchronously (non-blocking) to apply upgrades
 		const self = this;
 		(async () => {
 			try {
 				let profileDO = self.env.PLAYER_PROFILE.get(self.env.PLAYER_PROFILE.idFromName(playerId));
 				let profileRes = await profileDO.fetch(new Request(`http://internal/get-stats?uid=${playerId}`));
 				let profileData = await profileRes.json();
-				if (profileData.username && self.gameState.players[pId]) {
-					self.gameState.players[pId].username = profileData.username;
+				
+				const p = self.gameState.players[pId];
+				if (p && profileData.classes && profileData.classes[charId]) {
+					const c = profileData.classes[charId];
+					p.level = c.level;
+					
+					let baseUsername = profileData.username || 'Player';
+					if (profileData.equippedTitle) {
+						p.username = `${baseUsername} [${profileData.equippedTitle}]`;
+					} else {
+						p.username = baseUsername;
+					}
+
+					// Skin selection
+					p.equippedSkin = (profileData.equippedSkins && profileData.equippedSkins[charId]) || 'Default';
+					
+					// Apply Level-Up Bonuses: +10 HP per level (beyond 1), +2 ATK per level (beyond 1)
+					const hpBonus = (c.level - 1) * 10;
+					p.maxHealth += hpBonus;
+					p.health += hpBonus;
+					p.atkBonus = (c.level - 1) * 2;
+					
 					self.broadcastState();
 				}
-			} catch(e) { console.error('Username fetch error:', e); }
+			} catch(e) { console.error('Profile fetch error:', e); }
 		})();
 
 		server.addEventListener('message', async (event) => {
@@ -574,6 +727,39 @@ export class GameRoom {
 				}
 				return;
 			}
+
+			// Rematch logic
+			if (data.action === 'rematch' && this.gameState.status === 'GAME_OVER') {
+				this.rematchVotes.add(playerId);
+				
+				if (this.rematchVotes.size === 2) {
+					// Restart Game
+					this.rematchVotes.clear();
+					
+					// Re-init health and abilities
+					for (const pId of ['p1', 'p2']) {
+						const p = this.gameState.players[pId];
+						const classData = this.getClassData(p.classId);
+						// Base + Level Bonuses
+						const hpBonus = (p.level - 1) * 10;
+						p.maxHealth = classData.hp + hpBonus;
+						p.health = p.maxHealth;
+						p.abilities = classData.abilities.map(a => ({...a}));
+						p.shield = { active: false, percent: 0 };
+						p.dodge = false;
+					}
+
+					this.gameState.status = 'IN_PROGRESS';
+					this.gameState.turn = 0;
+					this.startTurnTimer();
+					this.broadcastState();
+				} else {
+					// Notify other player that this player wants a rematch
+					const statusMsg = JSON.stringify({ type: 'REMATCH_VOTE', pId: playerId });
+					this.sessions.forEach(s => { try { s.ws.send(statusMsg); } catch(e) {} });
+				}
+				return;
+			}
 			
 			if (this.gameState.status !== 'IN_PROGRESS') return;
 
@@ -593,7 +779,7 @@ export class GameRoom {
 
 				// Apply ability effects
 				if (ability.type === 'damage') {
-					let dmg = ability.dmg;
+					let dmg = ability.dmg + (player.atkBonus || 0);
 					if (opponent.dodge) {
 						dmg = 0; // Dodged!
 						opponent.dodge = false;
@@ -603,7 +789,7 @@ export class GameRoom {
 					}
 					opponent.health -= dmg;
 				} else if (ability.type === 'drain') {
-					let dmg = ability.dmg;
+					let dmg = ability.dmg + (player.atkBonus || 0);
 					if (opponent.dodge) {
 						dmg = 0;
 						opponent.dodge = false;
@@ -633,23 +819,29 @@ export class GameRoom {
 					this.gameState.status = 'GAME_OVER';
 					this.clearTurnTimer();
 					
-					const awardXP = async (uid, isWin) => {
-						if (!uid) return;
+					const awardXP = async (p, isWin) => {
+						if (!p || !p.uid) return null;
 						try {
-							let xpDO = this.env.PLAYER_PROFILE.get(this.env.PLAYER_PROFILE.idFromName(uid));
-							await xpDO.fetch(new Request(`http://internal/add-xp?win=${isWin}`));
+							let xpDO = this.env.PLAYER_PROFILE.get(this.env.PLAYER_PROFILE.idFromName(p.uid));
+							const res = await xpDO.fetch(new Request(`http://internal/add-xp?win=${isWin}&uid=${p.uid}&classId=${p.classId}`));
+							const updatedStats = await res.json();
+							return {
+								xpGained: isWin ? 50 : 10,
+								...updatedStats
+							};
 						} catch (e) {
 							console.error("Failed assigning XP:", e);
+							return null;
 						}
 					};
 
-					if (p1.health > 0 && p2.health <= 0) {
-						await awardXP(p1.uid, true);
-						await awardXP(p2.uid, false);
-					} else if (p2.health > 0 && p1.health <= 0) {
-						await awardXP(p1.uid, false);
-						await awardXP(p2.uid, true);
-					}
+					const [p1Results, p2Results] = await Promise.all([
+						awardXP(p1, p1.health > 0),
+						awardXP(p2, p2.health > 0)
+					]);
+
+					if (p1Results) p1.postGame = p1Results;
+					if (p2Results) p2.postGame = p2Results;
 
 					this.broadcastState();
 				} else {
@@ -697,6 +889,7 @@ export class GameRoom {
 			this.sessions = this.sessions.filter(s => s.ws !== ws);
 			this.gameState.status = 'WAITING_FOR_PLAYERS';
 			this.gameState.players = {};
+			this.rematchVotes.clear();
 			this.sessions.forEach(s => {
 				try { s.ws.close(1011, "Opponent disconnected"); } catch(e) {}
 			});
@@ -753,6 +946,20 @@ export class Matchmaker {
 	async fetch(request) {
 		const url = new URL(request.url);
 		
+		if (url.pathname === '/get-room') {
+			let openRoomId = this.memoryRoomId || await this.state.storage.get('openRoomId');
+			if (openRoomId) {
+				this.memoryRoomId = null;
+				await this.state.storage.delete('openRoomId');
+				return new Response(JSON.stringify({ roomId: openRoomId, isNew: false }));
+			} else {
+				const newRoomId = 'room-' + crypto.randomUUID();
+				this.memoryRoomId = newRoomId;
+				await this.state.storage.put('openRoomId', newRoomId);
+				return new Response(JSON.stringify({ roomId: newRoomId, isNew: true }));
+			}
+		}
+
 		if (url.pathname === '/relist') {
 			let roomId = url.searchParams.get('roomId');
 			let openRoomId = this.memoryRoomId || await this.state.storage.get('openRoomId');
@@ -860,6 +1067,11 @@ export class Leaderboard {
 			} catch(e) {
 				return new Response('Error', { status: 500 });
 			}
+		}
+
+		if (url.pathname === '/wipe') {
+			await this.state.storage.deleteAll();
+			return new Response('OK');
 		}
 
 		return new Response('Not found', { status: 404 });

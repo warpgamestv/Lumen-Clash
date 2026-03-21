@@ -4,6 +4,7 @@
   "scripts": {
     "dev-backend": "cd backend && npm run dev",
     "dev-frontend": "node frontend/server.js",
+    "wipe-all": "node wipe-all-data.js",
     "test": "node test_connection.js"
   },
   "dependencies": {

@@ -12,6 +12,25 @@
     
     <link rel="stylesheet" href="css/style.css?v=14">
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+    <script>
+        // Ghost Hunter Debugger: Catch any click-stealers in the act
+        window.addEventListener('click', (e) => {
+            const overlay = document.getElementById('xp-splash-overlay');
+            const isActive = overlay && !overlay.classList.contains('hidden');
+            const style = window.getComputedStyle(e.target);
+            
+            console.log("[GhostHunter] Click Target:", e.target.tagName, 
+                        "ID:", e.target.id || "None", 
+                        "Z-Index:", style.zIndex,
+                        "PointerEvents:", style.pointerEvents);
+            
+            if (isActive) {
+                if (!overlay.contains(e.target) && e.target !== overlay) {
+                    console.warn("[GhostHunter] INTERCEPTED by non-splash element while results active!", e.target);
+                }
+            }
+        }, true);
+    </script>
 </head>
 <body>
     <div id="game-container">
@@ -25,11 +44,15 @@
             <!-- Profile moved to dedicated modal -->
             <div class="character-display">
                 <h2>Your Combatant</h2>
-                <div class="char-class" id="menu-char-name">Void Weaver</div>
-                <div class="char-stats" id="menu-char-stats">Assassin Class<br>High Burst / Low Health</div>
+                <div class="char-class" id="menu-char-name">Knight</div>
+                <div class="char-stats" id="menu-char-stats">Tank Class<br>High Health / Modest Damage</div>
             </div>
             <div class="menu-buttons" style="display: flex; flex-direction: column; gap: 12px; width: 320px;">
                 <button id="btn-play-game" class="menu-btn" style="width: 100%; margin-bottom: 5px;">Play Game</button>
+                <button id="btn-battle-pass" class="menu-btn premium-btn" style="display: flex; justify-content: space-between; align-items: center; background: linear-gradient(0deg, #aa8800, #ffcc00); border: none; color: #000; font-weight: 800; padding: 10px 20px; font-family: 'Rajdhani', sans-serif; letter-spacing: 1px;">
+                    <span>🏆 LUMINARY PASS</span>
+                    <span id="bp-account-level-button" style="background: #000; color: #ffcc00; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem;">Rank 1</span>
+                </button>
                 <div style="display: flex; gap: 10px; width: 100%;">
                     <button id="btn-character" class="menu-btn secondary-btn" style="flex: 1; font-size: 1rem; padding: 10px;">🛡️ Team</button>
                     <button id="btn-leaderboard" class="menu-btn secondary-btn" style="flex: 1; font-size: 1rem; padding: 10px;">🏆 Rank</button>
@@ -54,17 +77,26 @@
     <div id="character-menu-container" class="hidden">
         <h1 class="game-title" style="font-size: 4rem; margin-top: 0;">Roster</h1>
         <div class="char-roster">
-            <div class="char-card selected-card" data-index="0">
+            <div class="char-card selected-card" data-char="aegisKnight">
+                <h3>Knight</h3>
+                <div class="char-level-badge">Lv. 1</div>
+                <div class="char-card-xp-bar"><div class="fill" style="width: 0%"></div></div>
+                <p>Tank Class<br>High Health / Modest Damage</p>
+                <button class="btn-customize-link">Customize 🎨</button>
+            </div>
+            <div class="char-card" data-char="lumenSage">
+                <h3>Sage</h3>
+                <div class="char-level-badge">Lv. 1</div>
+                <div class="char-card-xp-bar"><div class="fill" style="width: 0%"></div></div>
+                <p>Mage Class<br>Low Health / High Burst</p>
+                <button class="btn-customize-link">Customize 🎨</button>
+            </div>
+            <div class="char-card" data-char="voidWeaver">
                 <h3>Void Weaver</h3>
-                <p>Assassin Class<br>High Burst / Low Health</p>
-            </div>
-            <div class="char-card" data-index="1">
-                <h3>Aegis Knight</h3>
-                <p>Tank Class<br>High Health / Low Damage</p>
-            </div>
-            <div class="char-card" data-index="2">
-                <h3>Lumen Sage</h3>
-                <p>Mage Class<br>Lowest Health / Epic Burst</p>
+                <div class="char-level-badge">Lv. 1</div>
+                <div class="char-card-xp-bar"><div class="fill" style="width: 0%"></div></div>
+                <p>Assassin Class<br>Medium Health / High Speed</p>
+                <button class="btn-customize-link">Customize 🎨</button>
             </div>
         </div>
         <button id="btn-close-char-menu" class="menu-btn secondary-btn" style="margin-top: 20px;">Back ↩</button>
@@ -262,12 +294,121 @@
         </div>
     </div>
 
+    <!-- Battle Pass Modal -->
+    <div id="battle-pass-modal" class="modal hidden">
+        <div class="modal-content">
+            <span id="btn-close-bp" class="close-modal" onclick="closeModal('battle-pass-modal')">&times;</span>
+            <div class="modal-header-premium">
+                <h2>🏆 LUMINARY PASS</h2>
+                <div class="account-level-badge">
+                    <span>Rank</span>
+                    <span id="bp-account-level">1</span>
+                </div>
+            </div>
+            
+            <div class="bp-track-container">
+                <div id="bp-track" class="bp-track">
+                    <!-- Rewards generated via JS -->
+                </div>
+            </div>
+            
+            <div class="bp-footer">
+                <p>Earn XP with any character to rank up your Luminary Pass!</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Character Preview & Customization Modal -->
+    <div id="character-preview-modal" class="modal hidden">
+        <div class="modal-content-narrow">
+            <span id="btn-close-cp" class="close-modal" onclick="closeModal('character-preview-modal')">&times;</span>
+            
+            <div class="char-preview-card">
+                <div class="char-preview-visual">
+                    <div id="char-preview-sprite-container"></div>
+                    <div class="char-preview-name" id="preview-char-name">Knight</div>
+                    <div class="char-preview-level" id="preview-char-level">Lvl 1</div>
+                </div>
+                
+                <div class="char-preview-stats">
+                    <div class="stat-row">
+                        <span>HP</span>
+                        <div class="stat-bar-bg"><div id="preview-hp-bar" class="stat-bar-fill hp" style="width: 100%"></div></div>
+                        <span id="preview-hp-val">100</span>
+                    </div>
+                    <div class="stat-row">
+                        <span>ATK</span>
+                        <div class="stat-bar-bg"><div id="preview-atk-bar" class="stat-bar-fill atk" style="width: 100%"></div></div>
+                        <span id="preview-atk-val">15</span>
+                    </div>
+                </div>
+
+                <div class="char-customization">
+                    <label>Title Selection</label>
+                    <select id="select-title" class="premium-select">
+                        <option value="">No Title</option>
+                    </select>
+
+                    <label>Skin Variant</label>
+                    <div class="skin-selector">
+                        <button class="skin-nav" onclick="prevSkin()">&lt;</button>
+                        <div id="current-skin-name" class="skin-name">Default</div>
+                        <button class="skin-nav" onclick="nextSkin()">&gt;</button>
+                    </div>
+                </div>
+
+                <div class="char-preview-actions">
+                    <button id="btn-save-customization" class="btn-primary-premium">SAVE CHANGES</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- ROTATE DEVICE OVERLAY (portrait only) -->
     <div id="rotate-overlay">
         <div class="rotate-content">
             <div class="rotate-icon">📱↻</div>
             <h2>Rotate Your Device</h2>
             <p>Lumen Clash is best played in landscape mode</p>
+        </div>
+    </div>
+
+    <!-- XP SPLASH / GAME OVER OVERLAY -->
+    <div id="xp-splash-overlay" class="hidden" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: radial-gradient(circle, rgba(10, 10, 30, 0.9) 0%, rgba(0,0,5,0.98) 100%); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 99999; text-align: center; padding: 20px; box-sizing: border-box; pointer-events: auto !important;">
+        
+        <div style="display: flex; gap: 20px; width: 100%; max-width: 400px; margin-bottom: 30px; pointer-events: auto;">
+            <button id="btn-rematch" class="menu-btn" onclick="handleSplashRematch()" style="flex: 2; background: linear-gradient(45deg, #ff00cc, #4a00e0); border: none; font-size: 1.3rem; position: relative; pointer-events: auto !important; cursor: pointer !important;">
+                Challenge Again
+                <div id="rematch-status" style="position: absolute; bottom: -25px; left: 0; width: 100%; font-size: 0.75rem; color: #ffcc00; font-weight: normal;"></div>
+            </button>
+            <button id="btn-splash-exit" class="menu-btn secondary-btn" onclick="handleSplashExit()" style="flex: 1; opacity: 0.6; font-size: 1rem; pointer-events: auto !important; cursor: pointer !important;">Main Menu</button>
+        </div>
+
+        <div id="splash-title" style="font-size: 5rem; font-family: 'Rajdhani', sans-serif; font-weight: 700; text-transform: uppercase; margin-bottom: 5px; letter-spacing: 5px; text-shadow: 0 0 40px rgba(0, 210, 255, 0.8);">VICTORY</div>
+        <div id="splash-subtitle" style="color: #aaa; margin-bottom: 40px; font-size: 1.2rem; letter-spacing: 2px;">MATCH COMPLETE</div>
+        
+        <div class="xp-module" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; padding: 30px; width: 90%; max-width: 500px; margin-bottom: 40px; box-shadow: 0 10px 40px rgba(0,0,0,0.5);">
+            <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 10px;">
+                <span style="font-family: 'Rajdhani', sans-serif; font-size: 1.5rem; color: #fff;">LEVEL <span id="splash-level">1</span></span>
+                <span style="color: #00d2ff; font-weight: bold;">+<span id="splash-xp-gained">0</span> XP</span>
+            </div>
+            <div class="xp-bar-bg" style="height: 12px; background: rgba(0,0,0,0.4); border-radius: 6px; overflow: hidden; margin-bottom: 8px;">
+                <div id="splash-xp-fill" class="xp-bar-fill" style="width: 0%; box-shadow: 0 0 15px #00d2ff;"></div>
+            </div>
+            <div id="splash-xp-details" style="font-size: 0.85rem; color: #888; text-align: right;">0 / 100 XP</div>
+            
+            <div id="level-up-burst" class="hidden" style="color: #ffcc00; font-weight: bold; margin-top: 15px; font-size: 1.3rem; animation: pulse 1s infinite;">✨ LEVEL UP! ✨</div>
+        </div>
+
+        <div id="bp-splash-module" class="xp-module" style="background: rgba(170, 136, 0, 0.05); border: 1px solid rgba(170, 136, 0, 0.2); border-radius: 20px; padding: 25px; width: 90%; max-width: 500px; margin-bottom: 40px; box-shadow: 0 5px 25px rgba(170, 136, 0, 0.2);">
+            <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 10px;">
+                <span style="font-family: 'Rajdhani', sans-serif; font-size: 1.2rem; color: #ffcc00; font-weight: bold;">LUMINARY PASS RANK <span id="bp-splash-rank">1</span></span>
+                <span id="bp-splash-xp-gained" style="color: #ffcc00; font-size: 0.9rem;">+0 Account XP</span>
+            </div>
+            <div class="xp-bar-bg" style="height: 8px; background: rgba(0,0,0,0.4); border-radius: 4px; overflow: hidden; margin-bottom: 8px;">
+                <div id="bp-splash-fill" class="xp-bar-fill" style="width: 0%; background: linear-gradient(90deg, #aa8800, #ffcc00); box-shadow: 0 0 10px rgba(255, 204, 0, 0.4);"></div>
+            </div>
+            <div id="bp-splash-details" style="font-size: 0.75rem; color: #aaa; text-align: right;">0 / 100 Account XP</div>
         </div>
     </div>
 
@@ -279,6 +420,6 @@
             <button id="btn-disconnect-ok" class="action-btn" style="background: linear-gradient(45deg, #ff0055, #ff00aa); border: none;">Return to Menu</button>
         </div>
     </div>
-    <script src="js/game.js?v=31"></script>
+    <script src="js/game.js?v=37"></script>
 </body>
 </html>
