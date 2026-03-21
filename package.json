@@ -1,4 +1,11 @@
 {
+  "name": "lumen-clash",
+  "version": "1.0.0",
+  "scripts": {
+    "dev-backend": "cd backend && npm run dev",
+    "dev-frontend": "node frontend/server.js",
+    "test": "node test_connection.js"
+  },
   "dependencies": {
     "ws": "^8.19.0"
   }
