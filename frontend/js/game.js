@@ -17,6 +17,10 @@ const config = {
 
 let game = null;
 
+function getGameContainer() {
+    return document.getElementById('game-container');
+}
+
 function initGame() {
     if (game) return; // Already running
     console.log("[Game] Initializing Phaser Instance");
@@ -477,7 +481,20 @@ function connectWebSocket(specificRoomId = null) {
     };
 }
 
+/** Clear victory/defeat overlay whenever the server leaves GAME_OVER (rematch, queue, new round). */
+function hideVictorySplashForActiveMatch() {
+    const splash = document.getElementById('xp-splash-overlay');
+    if (!splash) return;
+    splash.classList.add('hidden');
+    splash.classList.remove('active-showing');
+    splash.style.display = '';
+}
+
 function updateUI() {
+    if (gameState && gameState.status !== 'GAME_OVER') {
+        hideVictorySplashForActiveMatch();
+    }
+
     // Hide Main Menu and ALL modals if game started
     if (gameState.status === 'IN_PROGRESS') {
         document.getElementById('matchmaking-overlay').classList.add('hidden');
@@ -1111,10 +1128,13 @@ document.getElementById('btn-return').addEventListener('click', () => {
     document.getElementById('hp-right').style.width = '100%';
 
     // Visually reset sprites
-    const resetY = gameContainer.clientHeight * 0.35;
-    const resetScale = Math.min(0.45, gameContainer.clientHeight / 900);
-    if (playerLeftShape) playerLeftShape.setPosition(gameContainer.clientWidth * 0.25, resetY).setScale(resetScale).clearTint();
-    if (playerRightShape) playerRightShape.setPosition(gameContainer.clientWidth * 0.75, resetY).setScale(resetScale).clearTint();
+    const gc = getGameContainer();
+    if (gc) {
+        const resetY = gc.clientHeight * 0.35;
+        const resetScale = Math.min(0.45, gc.clientHeight / 900);
+        if (playerLeftShape) playerLeftShape.setPosition(gc.clientWidth * 0.25, resetY).setScale(resetScale).clearTint();
+        if (playerRightShape) playerRightShape.setPosition(gc.clientWidth * 0.75, resetY).setScale(resetScale).clearTint();
+    }
 
     // Reset multiplayer state
     myPlayerId = null;
@@ -1173,11 +1193,11 @@ function updateLeaderboardUI(data) {
 
 // Window resize handling for Phaser canvas
 window.addEventListener('resize', () => {
-    const cw = gameContainer.clientWidth;
-    const ch = gameContainer.clientHeight;
-    if (game.scale) {
-        game.scale.resize(cw, ch);
-    }
+    const gc = getGameContainer();
+    if (!gc || !game || !game.scale) return;
+    const cw = gc.clientWidth;
+    const ch = gc.clientHeight;
+    game.scale.resize(cw, ch);
     const resizeY = ch * 0.35;
     const resizeScale = Math.min(0.45, ch / 900);
     if (playerLeftShape) {
@@ -1206,48 +1226,58 @@ document.getElementById('btn-close-settings').addEventListener('click', () => {
     document.getElementById('settings-container').classList.add('hidden');
 });
 
-document.getElementById('btn-wipe-data').addEventListener('click', async () => {
-    if (confirm("⚠️ Are you sure you want to delete your save data? This will reset your progress and free up your username. This cannot be undone.")) {
-        try {
-            // Call backend to wipe THIS player's data
-            const uid = localStorage.getItem('lumen_clash_uid');
-            if (uid) {
-                await fetch(`/reset-player?uid=${uid}`);
+const btnWipe = document.getElementById('btn-wipe-data');
+if (btnWipe) {
+    btnWipe.addEventListener('click', async () => {
+        if (confirm("⚠️ Are you sure you want to delete your save data? This will reset your progress and free up your username. This cannot be undone.")) {
+            try {
+                const uid = localStorage.getItem('lumen_clash_uid');
+                if (uid) {
+                    await fetch(`/reset-player?uid=${uid}`);
+                }
+                localStorage.removeItem('lumen_clash_uid');
+                window.location.reload();
+            } catch (e) {
+                alert("Reset failed: " + e.message);
             }
-            // Clear local UID
-            localStorage.removeItem('lumen_clash_uid');
-            window.location.reload();
-        } catch(e) {
-            alert("Reset failed: " + e.message);
         }
-    }
-});
+    });
+}
 
-document.getElementById('btn-view-changelog').addEventListener('click', async () => {
-    document.getElementById('changelog-modal').classList.remove('hidden');
-    const contentDiv = document.getElementById('changelog-content');
-    contentDiv.innerText = "Loading changelog...";
-    try {
-        const res = await fetch(`http://${window.location.hostname}:8083/changelog`);
-        if (!res.ok) throw new Error("Changelog not found");
-        const text = await res.text();
-        contentDiv.innerText = text; // Just raw text for now until a markdown parser is used
-    } catch(e) {
-        contentDiv.innerText = "Failed to load changelog. Make sure the local server is running.";
-    }
-});
+const btnViewChangelog = document.getElementById('btn-view-changelog');
+if (btnViewChangelog) {
+    btnViewChangelog.addEventListener('click', async () => {
+        document.getElementById('changelog-modal').classList.remove('hidden');
+        const contentDiv = document.getElementById('changelog-content');
+        if (contentDiv) contentDiv.innerText = "Loading changelog...";
+        try {
+            const res = await fetch(`http://${window.location.hostname}:8083/changelog`);
+            if (!res.ok) throw new Error("Changelog not found");
+            const text = await res.text();
+            if (contentDiv) contentDiv.innerText = text;
+        } catch (e) {
+            if (contentDiv) contentDiv.innerText = "Failed to load changelog. Make sure the local server is running.";
+        }
+    });
+}
 
-document.getElementById('btn-close-changelog').addEventListener('click', () => {
-    document.getElementById('changelog-modal').classList.add('hidden');
-});
+const btnCloseChangelog = document.getElementById('btn-close-changelog');
+if (btnCloseChangelog) {
+    btnCloseChangelog.addEventListener('click', () => {
+        document.getElementById('changelog-modal').classList.add('hidden');
+    });
+}
 
 // Click outside background to close modals
 const UI_MODALS = [
     { container: 'character-menu-container', closeBtn: 'btn-close-char-menu' },
     { container: 'profile-container', closeBtn: 'btn-close-profile' },
     { container: 'settings-container', closeBtn: 'btn-close-settings' },
+    { container: 'social-container', closeBtn: 'btn-close-social' },
     { container: 'leaderboard-container', closeBtn: 'btn-close-leaderboard' },
     { container: 'changelog-modal', closeBtn: 'btn-close-changelog' },
+    { container: 'play-mode-modal', closeBtn: 'btn-close-play-mode' },
+    { container: 'private-match-container', closeBtn: 'btn-close-private' },
     { container: 'emote-presets-modal', closeBtn: 'btn-close-emote-presets' },
     { container: 'battle-pass-modal', closeBtn: 'btn-close-bp' },
     { container: 'character-preview-modal', closeBtn: 'btn-close-cp' }
@@ -1425,18 +1455,21 @@ async function saveCustomization() {
     } catch(e) { console.error("Save failed", e); }
 }
 
-// Global capture-phase click listener to debug obstructions
-window.addEventListener('click', (e) => {
-    console.log("[Global Click Capture] Target:", e.target, "ID:", e.target.id, "Path:", e.composedPath().map(el => el.tagName + (el.id ? '#' + el.id : '')));
-}, true);
-
 // Fail-safe global handlers for Splash Screen
 window.handleSplashExit = function() {
     console.log("[Splash] Exit clicked");
-    document.getElementById('xp-splash-overlay').classList.add('hidden');
-    document.getElementById('xp-splash-overlay').classList.remove('active-showing');
+    const splash = document.getElementById('xp-splash-overlay');
+    if (splash) {
+        splash.classList.add('hidden');
+        // Keep .active-showing while gameState may still be GAME_OVER, or updateUI() will show the splash again.
+    }
     if (socket) socket.close();
-    updateUI(); 
+
+    document.getElementById('ui-container').classList.add('hidden');
+    document.getElementById('matchmaking-overlay').classList.add('hidden');
+    document.getElementById('main-menu-container').classList.remove('hidden');
+
+    updateUI();
 };
 
 window.handleSplashRematch = function() {
@@ -1444,15 +1477,17 @@ window.handleSplashRematch = function() {
     if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ action: 'rematch' }));
         const btn = document.getElementById('btn-rematch');
-        if (btn) {
-            btn.innerText = 'Waiting for Opponent...';
-            btn.disabled = true;
-        }
+        const label = document.getElementById('btn-rematch-label');
+        if (label) label.textContent = 'Waiting for Opponent...';
+        if (btn) btn.disabled = true;
         if (typeof sfx.playClick === 'function') sfx.playClick();
-        
-        // Restore game for rematch
         initGame();
+        return;
     }
+    console.warn('[Splash] Rematch: no active socket — return to menu');
+    const st = document.getElementById('rematch-status');
+    if (st) st.textContent = 'Connection lost — use Play from the menu.';
+    window.handleSplashExit();
 };
 
 async function showXPSplash(won, pg) {
@@ -1479,8 +1514,8 @@ async function showXPSplash(won, pg) {
         return;
     }
 
-    // Hide other likely obstructions
-    ['matchmaking-overlay', 'profile-container', 'settings-container', 'character-menu-container', 'disconnect-modal'].forEach(id => {
+    // Hide other likely obstructions (including the HUD)
+    ['ui-container', 'matchmaking-overlay', 'profile-container', 'settings-container', 'character-menu-container', 'disconnect-modal'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.classList.add('hidden');
     });
@@ -1501,9 +1536,10 @@ async function showXPSplash(won, pg) {
     // Enable buttons
     const btnRematch = document.getElementById('btn-rematch');
     const btnExit = document.getElementById('btn-splash-exit');
+    const rematchLbl = document.getElementById('btn-rematch-label');
+    if (rematchLbl) rematchLbl.textContent = 'Challenge Again';
     if (btnRematch) {
         btnRematch.disabled = false;
-        btnRematch.innerText = 'Challenge Again';
         btnRematch.style.pointerEvents = "auto";
         btnRematch.style.cursor = "pointer";
     }
@@ -1574,22 +1610,19 @@ async function showXPSplash(won, pg) {
     }
 }
 
-document.getElementById('btn-rematch').addEventListener('click', () => {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ action: 'rematch' }));
-        const btn = document.getElementById('btn-rematch');
-        btn.innerText = 'Waiting for Opponent...';
-        btn.disabled = true;
-        sfx.playClick();
-    }
-});
+const btnRematchEl = document.getElementById('btn-rematch');
+const btnExitEl = document.getElementById('btn-splash-exit');
 
-document.getElementById('btn-splash-exit').addEventListener('click', () => {
-    document.getElementById('xp-splash-overlay').classList.add('hidden');
-    document.getElementById('xp-splash-overlay').classList.remove('active-showing');
-    if (socket) socket.close();
-    updateUI();
-});
+function bindSplashButton(el, handler) {
+    if (!el) return;
+    el.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        handler();
+    });
+}
+bindSplashButton(btnRematchEl, () => window.handleSplashRematch());
+bindSplashButton(btnExitEl, () => window.handleSplashExit());
 
 // ============================================================
 // IN-GAME EMOTE BAR
@@ -1629,11 +1662,14 @@ function updateSoundBtn() {
 }
 updateSoundBtn();
 
-document.getElementById('btn-sound-settings').addEventListener('click', () => {
-    sfx.toggle();
-    updateSoundBtn();
-    sfx.playClick();
-});
+const btnSoundSettings = document.getElementById('btn-sound-settings');
+if (btnSoundSettings) {
+    btnSoundSettings.addEventListener('click', () => {
+        sfx.toggle();
+        updateSoundBtn();
+        sfx.playClick();
+    });
+}
 
 // ============================================================
 // EMOTE PRESETS MODAL
@@ -1681,26 +1717,34 @@ function renderEmotePresetsModal() {
     });
 }
 
-document.getElementById('btn-quick-emotes').addEventListener('click', () => {
-    editingSlot = 0;
-    renderEmotePresetsModal();
-    document.getElementById('emote-presets-modal').classList.remove('hidden');
-    sfx.playClick();
-});
+const btnEmotePresets = document.getElementById('btn-emote-presets');
+if (btnEmotePresets) {
+    btnEmotePresets.addEventListener('click', () => {
+        editingSlot = 0;
+        renderEmotePresetsModal();
+        const modal = document.getElementById('emote-presets-modal');
+        if (modal) modal.classList.remove('hidden');
+        sfx.playClick();
+    });
+}
 
-document.getElementById('btn-close-emote-presets').addEventListener('click', () => {
-    document.getElementById('emote-presets-modal').classList.add('hidden');
-    saveEmotePresets(activeEmotes);
-    sfx.playClick();
-});
+const btnCloseEmotePresets = document.getElementById('btn-close-emote-presets');
+if (btnCloseEmotePresets) {
+    btnCloseEmotePresets.addEventListener('click', () => {
+        const modal = document.getElementById('emote-presets-modal');
+        if (modal) modal.classList.add('hidden');
+        saveEmotePresets(activeEmotes);
+        sfx.playClick();
+    });
+}
 
 // Add click sound to all major menu buttons
- ['btn-play-game','btn-character','btn-leaderboard','btn-profile','btn-settings',
+ ['btn-play-game','btn-character','btn-leaderboard','btn-profile','btn-social','btn-settings',
   'btn-close-char-menu','btn-close-profile','btn-close-settings','btn-close-leaderboard',
   'btn-close-changelog','btn-view-changelog','btn-return','btn-disconnect-ok',
   'btn-quick-match','btn-private-choice','btn-close-play-mode','btn-close-private',
   'btn-host-choice','btn-join-choice','btn-submit-join','btn-rematch','btn-splash-exit',
-  'btn-battle-pass', 'btn-save-customization'].forEach(id => {
+  'btn-battle-pass', 'btn-emote-presets', 'btn-save-customization'].forEach(id => {
      const el = document.getElementById(id);
      if (el) el.addEventListener('click', () => sfx.playClick(), true);
  });

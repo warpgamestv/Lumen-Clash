@@ -1,5 +1,17 @@
 # Lumen Clash
 
+## v1.1.0 — Main Menu & Presentation (2026-03-22)
+### Added
+- **Animated menu backdrop**: Linked `background.css` and added the `#menu-background-layer` markup (nebula, particles, scanlines, vignette) so the main menu shows the intended background.
+- **Header tagline** under the game title on the main menu.
+
+### Changed
+- **Main menu layout**: Professional shell with a **left navigation rail** (Luminary Pass, Team, Rankings, Profile, Social, Settings) and a **primary Play** action anchored **bottom-right** in the main area.
+- **Combatant panel**: Right-aligned **glass-style card** (“Active combatant”) with refined typography; Play button uses a dedicated **primary CTA** style (title + “Find a match” subtitle).
+- **Responsive behavior**: Main menu **stacks** on narrow or short viewports (`max-width: 720px` or `max-height: 500px`) using rules scoped to the menu so **combat HUD** compact styles still apply only when the viewport is **short**, not merely narrow.
+- **Post-match overlay**: `#xp-splash-overlay` moved to the **top of `<body>`** for more reliable stacking and input behavior; splash flow also hides **`#ui-container`** so the HUD does not sit above the results screen.
+- **Splash actions**: Rematch and Main Menu on the splash use dedicated handlers with guarded listeners; **Social** included in the global menu **click** sound list.
+
 ## v1.0.0 — Luminary Pass & Customization (2026-03-21)
 ### Added
 - **Luminary Pass**: A global account progression system with 20 ranks of rewards.

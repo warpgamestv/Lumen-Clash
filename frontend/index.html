@@ -10,7 +10,8 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
     
-    <link rel="stylesheet" href="css/style.css?v=14">
+    <link rel="stylesheet" href="css/style.css?v=16">
+    <link rel="stylesheet" href="css/background.css?v=1">
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
     <script>
         // Ghost Hunter Debugger: Catch any click-stealers in the act
@@ -33,40 +34,111 @@
     </script>
 </head>
 <body>
+    <!-- XP SPLASH / GAME OVER OVERLAY -->
+    <div id="xp-splash-overlay" class="hidden xp-splash-overlay">
+        <div class="xp-splash-inner">
+            <div id="splash-title" class="xp-splash-title">VICTORY</div>
+            <div id="splash-subtitle" class="xp-splash-subtitle">MATCH COMPLETE</div>
+
+            <div class="xp-module xp-splash-card card-glass">
+                <div class="xp-splash-row">
+                    <span class="xp-splash-level-label">LEVEL <span id="splash-level">1</span></span>
+                    <span class="xp-splash-xp-gain">+<span id="splash-xp-gained">0</span> XP</span>
+                </div>
+                <div class="xp-bar-bg xp-splash-bar-bg">
+                    <div id="splash-xp-fill" class="xp-bar-fill xp-splash-xp-fill"></div>
+                </div>
+                <div id="splash-xp-details" class="xp-splash-xp-details">0 / 100 XP</div>
+                <div id="level-up-burst" class="hidden level-up-burst">LEVEL UP!</div>
+            </div>
+
+            <div id="bp-splash-module" class="xp-module xp-splash-bp card-glass">
+                <div class="xp-splash-row">
+                    <span class="xp-splash-bp-label">LUMINARY PASS RANK <span id="bp-splash-rank">1</span></span>
+                    <span id="bp-splash-xp-gained" class="xp-splash-bp-xp">+0 Account XP</span>
+                </div>
+                <div class="xp-bar-bg xp-splash-bar-bg xp-splash-bar-bg--bp">
+                    <div id="bp-splash-fill" class="xp-bar-fill xp-splash-bp-fill"></div>
+                </div>
+                <div id="bp-splash-details" class="xp-splash-xp-details">0 / 100 Account XP</div>
+            </div>
+
+            <div class="xp-splash-actions">
+                <button type="button" id="btn-rematch" class="menu-btn xp-splash-btn-rematch">
+                    <span id="btn-rematch-label">Challenge Again</span>
+                    <span id="rematch-status" class="rematch-status-line" aria-live="polite"></span>
+                </button>
+                <button type="button" id="btn-splash-exit" class="menu-btn secondary-btn xp-splash-btn-exit">Main Menu</button>
+            </div>
+        </div>
+    </div>
+
     <div id="game-container">
         <!-- Phaser injects canvas here -->
     </div>
 
     <!-- MAIN MENU UI -->
     <div id="main-menu-container">
-        <h1 class="game-title">Lumen Clash</h1>
-        <div class="menu-content">
-            <!-- Profile moved to dedicated modal -->
-            <div class="character-display">
-                <h2>Your Combatant</h2>
-                <div class="char-class" id="menu-char-name">Knight</div>
-                <div class="char-stats" id="menu-char-stats">Tank Class<br>High Health / Modest Damage</div>
+        <div id="menu-background-layer" aria-hidden="true">
+            <div class="nebula-cloud nebula-1"></div>
+            <div class="nebula-cloud nebula-2"></div>
+            <div class="nebula-cloud nebula-3"></div>
+            <div class="nebula-core"></div>
+            <div class="lumen-particles"></div>
+        </div>
+
+        <header class="main-menu-header">
+            <div class="main-menu-brand">
+                <h1 class="game-title">Lumen Clash</h1>
+                <p class="main-menu-tagline">Tactical arena · Real-time duels</p>
             </div>
-            <div class="menu-buttons" style="display: flex; flex-direction: column; gap: 12px; width: 320px;">
-                <button id="btn-play-game" class="menu-btn" style="width: 100%; margin-bottom: 5px;">Play Game</button>
-                <button id="btn-battle-pass" class="menu-btn premium-btn" style="display: flex; justify-content: space-between; align-items: center; background: linear-gradient(0deg, #aa8800, #ffcc00); border: none; color: #000; font-weight: 800; padding: 10px 20px; font-family: 'Rajdhani', sans-serif; letter-spacing: 1px;">
-                    <span>🏆 LUMINARY PASS</span>
-                    <span id="bp-account-level-button" style="background: #000; color: #ffcc00; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem;">Rank 1</span>
+        </header>
+
+        <div class="main-menu-layout">
+            <nav class="main-menu-sidebar main-menu-nav" aria-label="Main menu">
+                <button type="button" id="btn-battle-pass" class="menu-nav-item menu-nav-pass">
+                    <span class="menu-nav-text">Luminary Pass</span>
+                    <span id="bp-account-level-button" class="menu-nav-rank-badge">1</span>
                 </button>
-                <div style="display: flex; gap: 10px; width: 100%;">
-                    <button id="btn-character" class="menu-btn secondary-btn" style="flex: 1; font-size: 1rem; padding: 10px;">🛡️ Team</button>
-                    <button id="btn-leaderboard" class="menu-btn secondary-btn" style="flex: 1; font-size: 1rem; padding: 10px;">🏆 Rank</button>
-                </div>
-                <div style="display: flex; gap: 10px; width: 100%;">
-                    <button id="btn-profile" class="menu-btn secondary-btn" style="flex: 1; font-size: 1rem; padding: 10px;">👤 Profile</button>
-                    <button id="btn-social" class="menu-btn secondary-btn" style="flex: 1; font-size: 1rem; padding: 10px; background: rgba(255, 0, 204, 0.2); position: relative;">
-                        💞 Social
-                        <div id="social-dot" class="hidden" style="position: absolute; top: -5px; right: -5px; width: 12px; height: 12px; background: #ff0055; border-radius: 50%; box-shadow: 0 0 10px #ff0055; border: 2px solid #000;"></div>
+                <button type="button" id="btn-character" class="menu-nav-item">
+                    <span class="menu-nav-label">Team</span>
+                    <span class="menu-nav-hint">Roster &amp; loadout</span>
+                </button>
+                <button type="button" id="btn-leaderboard" class="menu-nav-item">
+                    <span class="menu-nav-label">Rankings</span>
+                    <span class="menu-nav-hint">Leaderboard</span>
+                </button>
+                <button type="button" id="btn-profile" class="menu-nav-item">
+                    <span class="menu-nav-label">Profile</span>
+                    <span class="menu-nav-hint">Stats &amp; history</span>
+                </button>
+                <button type="button" id="btn-social" class="menu-nav-item menu-nav-social">
+                    <span class="menu-nav-label">Social</span>
+                    <span class="menu-nav-hint">Friends &amp; invites</span>
+                    <span id="social-dot" class="social-notify-dot hidden" aria-hidden="true"></span>
+                </button>
+                <button type="button" id="btn-settings" class="menu-nav-item">
+                    <span class="menu-nav-label">Settings</span>
+                    <span class="menu-nav-hint">Audio &amp; controls</span>
+                </button>
+            </nav>
+
+            <div class="main-menu-center">
+                <section class="character-panel card-glass" aria-labelledby="char-eyebrow">
+                    <p class="character-panel-eyebrow" id="char-eyebrow">Active combatant</p>
+                    <div class="char-class" id="menu-char-name">Knight</div>
+                    <div class="char-stats" id="menu-char-stats">Tank Class<br>High Health / Modest Damage</div>
+                </section>
+
+                <div class="main-menu-play-zone">
+                    <button type="button" id="btn-play-game" class="menu-btn menu-btn-play">
+                        <span class="menu-btn-play-title">Play</span>
+                        <span class="menu-btn-play-sub">Find a match</span>
                     </button>
                 </div>
-                <button id="btn-settings" class="menu-btn secondary-btn" style="width: 100%; font-size: 1rem; padding: 10px;">⚙️ Settings</button>
             </div>
         </div>
+
         <div id="matchmaking-overlay" class="hidden">
             <div class="spinner"></div>
             <h2 id="matchmaking-text">Finding Opponent...</h2>
@@ -74,8 +146,11 @@
     </div>
 
     <!-- CHARACTER MENU -->
-    <div id="character-menu-container" class="hidden">
-        <h1 class="game-title" style="font-size: 4rem; margin-top: 0;">Roster</h1>
+    <div id="character-menu-container" class="hidden lumen-modal-screen lumen-modal-screen--roster">
+        <div class="lumen-modal-head">
+            <p class="lumen-modal-eyebrow">Squad</p>
+            <h1 class="modal-screen-title">Roster</h1>
+        </div>
         <div class="char-roster">
             <div class="char-card selected-card" data-char="aegisKnight">
                 <h3>Knight</h3>
@@ -99,12 +174,15 @@
                 <button class="btn-customize-link">Customize 🎨</button>
             </div>
         </div>
-        <button id="btn-close-char-menu" class="menu-btn secondary-btn" style="margin-top: 20px;">Back ↩</button>
+        <button type="button" id="btn-close-char-menu" class="menu-btn secondary-btn btn-lumen-back">Back ↩</button>
     </div>
 
     <!-- PROFILE MENU -->
-    <div id="profile-container" class="hidden" style="display: flex; flex-direction: column; align-items: center; justify-content: flex-start; background: rgba(10, 10, 20, 0.8); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 200; padding: 20px; box-sizing: border-box;">
-        <h1 class="game-title" style="font-size: 3rem; margin-top: 10px; margin-bottom: 20px;">Player Profile</h1>
+    <div id="profile-container" class="hidden lumen-modal-screen">
+        <div class="lumen-modal-head">
+            <p class="lumen-modal-eyebrow">Account</p>
+            <h1 class="modal-screen-title">Player Profile</h1>
+        </div>
         
         <div id="player-profile-card" style="margin-bottom: 20px; width: 90%; max-width: 600px;">
             <div id="username-display">
@@ -127,12 +205,15 @@
             <div style="padding: 20px; text-align: center; color: #888;">No matches played yet.</div>
         </div>
 
-        <button id="btn-close-profile" class="menu-btn secondary-btn" style="width: auto; padding: 8px 30px;">Back ↩</button>
+        <button type="button" id="btn-close-profile" class="menu-btn secondary-btn btn-lumen-back">Back ↩</button>
     </div>
 
     <!-- SOCIAL / FRIENDS MENU -->
-    <div id="social-container" class="hidden" style="display: flex; flex-direction: column; align-items: center; justify-content: flex-start; background: rgba(10, 10, 20, 0.82); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px); position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 200; padding: 20px; box-sizing: border-box;">
-        <h1 class="game-title" style="font-size: 3rem; margin-top: 10px; margin-bottom: 20px;">Social</h1>
+    <div id="social-container" class="hidden lumen-modal-screen">
+        <div class="lumen-modal-head">
+            <p class="lumen-modal-eyebrow">Network</p>
+            <h1 class="modal-screen-title">Social</h1>
+        </div>
         
         <div style="display: flex; gap: 10px; width: 90%; max-width: 600px; margin-bottom: 20px;">
             <input type="text" id="input-friend-name" placeholder="Friend's username..." style="flex: 1; background: rgba(255,255,255,0.05); border: 1px solid #4a00e0; border-radius: 8px; color: white; padding: 10px; outline: none;">
@@ -148,13 +229,15 @@
             <div style="padding: 20px; text-align: center; color: #888;">No friends yet. Add some to play together!</div>
         </div>
 
-        <button id="btn-close-social" class="menu-btn secondary-btn" style="width: auto; padding: 8px 30px;">Back ↩</button>
+        <button type="button" id="btn-close-social" class="menu-btn secondary-btn btn-lumen-back">Back ↩</button>
     </div>
 
     <!-- PRIVATE MATCH MENU -->
-    <!-- PRIVATE MATCH MENU -->
-    <div id="private-match-container" class="hidden" style="display: flex; flex-direction: column; align-items: center; justify-content: center; background: rgba(5, 5, 16, 0.95); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px); position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 400; padding: 20px; box-sizing: border-box;">
-        <h2 style="color: #00d2ff; font-size: 2.2rem; margin-bottom: 30px; font-family: 'Rajdhani', sans-serif;">Private Match</h2>
+    <div id="private-match-container" class="hidden lumen-modal-screen lumen-modal-screen--center">
+        <div class="lumen-modal-head lumen-modal-head--compact">
+            <p class="lumen-modal-eyebrow">Invite only</p>
+            <h2 class="modal-screen-title modal-screen-title--h2">Private Match</h2>
+        </div>
         
         <!-- Sub-view 1: Choice -->
         <div id="private-choice-view" style="display: flex; flex-direction: column; gap: 20px; width: 100%; max-width: 320px;">
@@ -181,56 +264,65 @@
             <button id="btn-submit-join" class="action-btn" style="width: auto; padding: 12px 40px; background: linear-gradient(45deg, #00d2ff, #3a7bd5);">Join Battle</button>
         </div>
 
-        <button id="btn-close-private" class="menu-btn secondary-btn" style="margin-top: 50px; width: auto; padding: 8px 30px; opacity: 0.6;">Back ↩</button>
+        <button type="button" id="btn-close-private" class="menu-btn secondary-btn btn-lumen-back btn-lumen-back--muted">Back ↩</button>
     </div>
 
     <!-- PLAY MODE MODAL -->
-    <div id="play-mode-modal" class="hidden" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 5, 0.9); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 300; padding: 20px; box-sizing: border-box;">
-        <h2 style="color: #00d2ff; font-size: 2.2rem; margin-bottom: 40px; font-family: 'Rajdhani', sans-serif; text-transform: uppercase; letter-spacing: 2px;">Select Battle Mode</h2>
-        
-        <div style="display: flex; flex-direction: column; gap: 20px; width: 100%; max-width: 350px;">
-            <button id="btn-quick-match" class="menu-btn" style="background: linear-gradient(45deg, #4400ff, #00d2ff); border: none; padding: 20px; font-size: 1.4rem;">⚡ Quick Match</button>
-            <button id="btn-private-choice" class="menu-btn secondary-btn" style="background: rgba(255, 0, 204, 0.1); border: 2px solid #ff00cc; padding: 20px; font-size: 1.4rem; color: #ff00cc;">🔑 Private Match</button>
+    <div id="play-mode-modal" class="hidden lumen-modal-screen lumen-modal-screen--center">
+        <div class="lumen-modal-head lumen-modal-head--compact">
+            <p class="lumen-modal-eyebrow">Matchmaking</p>
+            <h2 class="modal-screen-title modal-screen-title--h2">Select Battle Mode</h2>
         </div>
-
-        <button id="btn-close-play-mode" class="menu-btn secondary-btn" style="margin-top: 40px; width: auto; padding: 8px 30px; opacity: 0.7;">Cancel ↩</button>
+        <div class="lumen-panel lumen-panel--modes">
+            <button type="button" id="btn-quick-match" class="menu-btn menu-btn-play-mode-primary">Quick Match</button>
+            <button type="button" id="btn-private-choice" class="menu-btn secondary-btn menu-btn-play-mode-private">Private Match</button>
+        </div>
+        <button type="button" id="btn-close-play-mode" class="menu-btn secondary-btn btn-lumen-back btn-lumen-back--muted">Cancel ↩</button>
     </div>
 
     <!-- SETTINGS MENU -->
-    <div id="settings-container" class="hidden" style="display: flex; flex-direction: column; align-items: center; justify-content: flex-start; background: rgba(10, 10, 20, 0.8); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 200; padding: 20px; box-sizing: border-box;">
-        <h1 class="game-title" style="font-size: 3rem; margin-top: 10px; margin-bottom: 20px;">Settings</h1>
-        
-        <div style="margin-bottom: 30px; display: flex; flex-direction: column; gap: 12px; width: 90%; max-width: 400px;">
-            <button id="btn-sound-settings" class="action-btn" style="background: #333;">🔊 Sound: ON</button>
-            <button id="btn-emote-presets" class="action-btn" style="background: #333;">🎭 Emote Presets</button>
-            <button id="btn-changelog" class="action-btn" style="background: #333;">📜 View Changelog</button>
-            <button id="btn-wipe-data" class="action-btn" style="background: #600;">🗑️ Wipe Save Data</button>
-        </div>    
+    <div id="settings-container" class="hidden lumen-modal-screen">
+        <div class="lumen-modal-head">
+            <p class="lumen-modal-eyebrow">Preferences</p>
+            <h1 class="modal-screen-title">Settings</h1>
         </div>
-
-        <button id="btn-close-settings" class="menu-btn secondary-btn" style="width: auto; padding: 8px 30px; margin-top: 20px;">Back ↩</button>
+        <div class="lumen-panel lumen-panel--stack">
+            <button type="button" id="btn-sound-settings" class="lumen-settings-row">Sound: ON</button>
+            <button type="button" id="btn-emote-presets" class="lumen-settings-row">Emote presets</button>
+            <button type="button" id="btn-view-changelog" class="lumen-settings-row">Changelog</button>
+            <button type="button" id="btn-wipe-data" class="lumen-settings-row lumen-settings-row--danger">Wipe save data</button>
+        </div>
+        <button type="button" id="btn-close-settings" class="menu-btn secondary-btn btn-lumen-back">Back ↩</button>
     </div>
 
     <!-- EMOTE PRESETS MODAL -->
-    <div id="emote-presets-modal" class="hidden" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 5, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 350; padding: 20px; box-sizing: border-box;">
-        <h2 style="color: #00d2ff; font-size: 1.8rem; margin-top: 0; margin-bottom: 10px;">Emote Presets</h2>
-        <p style="color: #aaa; font-size: 0.85rem; margin-bottom: 15px;">Choose 4 quick-use emotes for matches</p>
-        <div id="emote-slots" style="display: flex; gap: 12px; margin-bottom: 20px;"></div>
-        <div id="emote-pool" style="display: flex; flex-wrap: wrap; gap: 10px; max-width: 400px; justify-content: center; margin-bottom: 25px;"></div>
-        <button id="btn-close-emote-presets" class="action-btn" style="background: #444; width: auto; padding: 8px 30px;">Save & Close ↩</button>
+    <div id="emote-presets-modal" class="hidden lumen-modal-screen lumen-modal-screen--center">
+        <div class="lumen-modal-head lumen-modal-head--compact">
+            <p class="lumen-modal-eyebrow">In-match</p>
+            <h2 class="modal-screen-title modal-screen-title--h2">Emote Presets</h2>
+        </div>
+        <p class="lumen-modal-sub">Choose four quick-use emotes for matches.</p>
+        <div id="emote-slots" class="emote-slots-row"></div>
+        <div id="emote-pool" class="emote-pool-grid"></div>
+        <button type="button" id="btn-close-emote-presets" class="menu-btn secondary-btn btn-lumen-back">Save &amp; Close ↩</button>
     </div>
 
     <!-- CHANGELOG MODAL -->
-    <div id="changelog-modal" class="hidden" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 5, 0.8); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); display: flex; flex-direction: column; align-items: center; justify-content: flex-start; z-index: 300; padding: 20px; box-sizing: border-box;">
-        <h2 style="color: #00d2ff; font-size: 1.8rem; margin-top: 10px; margin-bottom: 15px;">Update Notes</h2>
-        <div id="changelog-content" style="width: 95%; max-width: 800px; flex: 1; overflow-y: auto; background: #111; border: 1px solid #444; padding: 15px; border-radius: 8px; color: #ddd; text-align: left; font-size: 0.9rem; font-family: monospace; white-space: pre-wrap; margin-bottom: 20px;">
+    <div id="changelog-modal" class="hidden lumen-modal-screen">
+        <div class="lumen-modal-head lumen-modal-head--compact">
+            <p class="lumen-modal-eyebrow">Patch notes</p>
+            <h2 class="modal-screen-title modal-screen-title--h2">Update Notes</h2>
         </div>
-        <button id="btn-close-changelog" class="action-btn" style="background: #444; width: auto; padding: 8px 30px; margin-top: 10px;">Back ↩</button>
+        <div id="changelog-content" class="changelog-body"></div>
+        <button type="button" id="btn-close-changelog" class="menu-btn secondary-btn btn-lumen-back">Back ↩</button>
     </div>
 
     <!-- LEADERBOARD MENU -->
-    <div id="leaderboard-container" class="hidden" style="display: flex; flex-direction: column; align-items: center; justify-content: flex-start; background: rgba(10, 10, 20, 0.8); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 200; padding: 20px; box-sizing: border-box;">
-        <h1 class="game-title" style="font-size: 3rem; margin-top: 10px; margin-bottom: 20px;">Global Top 50</h1>
+    <div id="leaderboard-container" class="hidden lumen-modal-screen">
+        <div class="lumen-modal-head">
+            <p class="lumen-modal-eyebrow">Competitive</p>
+            <h1 class="modal-screen-title">Global Top 50</h1>
+        </div>
         
         <div class="leaderboard-header" style="display: flex; width: 90%; max-width: 600px; padding: 10px 15px; background: rgba(74, 0, 224, 0.5); border-radius: 8px 8px 0 0; font-weight: bold; color: #fff; text-transform: uppercase; font-size: 0.8rem; letter-spacing: 1px;">
             <div style="flex: 0.5; text-align: center;">Rank</div>
@@ -244,7 +336,7 @@
             <div style="padding: 20px; text-align: center; color: #888;">Loading leaderboard...</div>
         </div>
 
-        <button id="btn-close-leaderboard" class="menu-btn secondary-btn" style="width: auto; padding: 8px 30px;">Back ↩</button>
+        <button type="button" id="btn-close-leaderboard" class="menu-btn secondary-btn btn-lumen-back">Back ↩</button>
     </div>
 
     <!-- GAME UI -->
@@ -373,53 +465,17 @@
         </div>
     </div>
 
-    <!-- XP SPLASH / GAME OVER OVERLAY -->
-    <div id="xp-splash-overlay" class="hidden" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: radial-gradient(circle, rgba(10, 10, 30, 0.9) 0%, rgba(0,0,5,0.98) 100%); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 99999; text-align: center; padding: 20px; box-sizing: border-box; pointer-events: auto !important;">
-        
-        <div style="display: flex; gap: 20px; width: 100%; max-width: 400px; margin-bottom: 30px; pointer-events: auto;">
-            <button id="btn-rematch" class="menu-btn" onclick="handleSplashRematch()" style="flex: 2; background: linear-gradient(45deg, #ff00cc, #4a00e0); border: none; font-size: 1.3rem; position: relative; pointer-events: auto !important; cursor: pointer !important;">
-                Challenge Again
-                <div id="rematch-status" style="position: absolute; bottom: -25px; left: 0; width: 100%; font-size: 0.75rem; color: #ffcc00; font-weight: normal;"></div>
-            </button>
-            <button id="btn-splash-exit" class="menu-btn secondary-btn" onclick="handleSplashExit()" style="flex: 1; opacity: 0.6; font-size: 1rem; pointer-events: auto !important; cursor: pointer !important;">Main Menu</button>
-        </div>
 
-        <div id="splash-title" style="font-size: 5rem; font-family: 'Rajdhani', sans-serif; font-weight: 700; text-transform: uppercase; margin-bottom: 5px; letter-spacing: 5px; text-shadow: 0 0 40px rgba(0, 210, 255, 0.8);">VICTORY</div>
-        <div id="splash-subtitle" style="color: #aaa; margin-bottom: 40px; font-size: 1.2rem; letter-spacing: 2px;">MATCH COMPLETE</div>
-        
-        <div class="xp-module" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); border-radius: 20px; padding: 30px; width: 90%; max-width: 500px; margin-bottom: 40px; box-shadow: 0 10px 40px rgba(0,0,0,0.5);">
-            <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 10px;">
-                <span style="font-family: 'Rajdhani', sans-serif; font-size: 1.5rem; color: #fff;">LEVEL <span id="splash-level">1</span></span>
-                <span style="color: #00d2ff; font-weight: bold;">+<span id="splash-xp-gained">0</span> XP</span>
-            </div>
-            <div class="xp-bar-bg" style="height: 12px; background: rgba(0,0,0,0.4); border-radius: 6px; overflow: hidden; margin-bottom: 8px;">
-                <div id="splash-xp-fill" class="xp-bar-fill" style="width: 0%; box-shadow: 0 0 15px #00d2ff;"></div>
-            </div>
-            <div id="splash-xp-details" style="font-size: 0.85rem; color: #888; text-align: right;">0 / 100 XP</div>
-            
-            <div id="level-up-burst" class="hidden" style="color: #ffcc00; font-weight: bold; margin-top: 15px; font-size: 1.3rem; animation: pulse 1s infinite;">✨ LEVEL UP! ✨</div>
-        </div>
-
-        <div id="bp-splash-module" class="xp-module" style="background: rgba(170, 136, 0, 0.05); border: 1px solid rgba(170, 136, 0, 0.2); border-radius: 20px; padding: 25px; width: 90%; max-width: 500px; margin-bottom: 40px; box-shadow: 0 5px 25px rgba(170, 136, 0, 0.2);">
-            <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 10px;">
-                <span style="font-family: 'Rajdhani', sans-serif; font-size: 1.2rem; color: #ffcc00; font-weight: bold;">LUMINARY PASS RANK <span id="bp-splash-rank">1</span></span>
-                <span id="bp-splash-xp-gained" style="color: #ffcc00; font-size: 0.9rem;">+0 Account XP</span>
-            </div>
-            <div class="xp-bar-bg" style="height: 8px; background: rgba(0,0,0,0.4); border-radius: 4px; overflow: hidden; margin-bottom: 8px;">
-                <div id="bp-splash-fill" class="xp-bar-fill" style="width: 0%; background: linear-gradient(90deg, #aa8800, #ffcc00); box-shadow: 0 0 10px rgba(255, 204, 0, 0.4);"></div>
-            </div>
-            <div id="bp-splash-details" style="font-size: 0.75rem; color: #aaa; text-align: right;">0 / 100 Account XP</div>
-        </div>
-    </div>
 
     <!-- DISCONNECT MODAL -->
-    <div id="disconnect-modal" class="hidden" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(10, 0, 5, 0.8); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 300;">
-        <div style="background: rgba(20, 20, 40, 0.95); border: 2px solid #ff0055; padding: 30px; border-radius: 12px; text-align: center; box-shadow: 0 0 30px rgba(255, 0, 85, 0.6); max-width: 400px; width: 80%;">
-            <h2 style="color: #ff0055; font-size: 1.8rem; margin-top: 0; margin-bottom: 15px;">Match Ended</h2>
-            <p style="font-size: 1.1rem; color: #ddd; margin-bottom: 25px;">Your opponent has disconnected or forfeited the match.</p>
-            <button id="btn-disconnect-ok" class="action-btn" style="background: linear-gradient(45deg, #ff0055, #ff00aa); border: none;">Return to Menu</button>
+    <div id="disconnect-modal" class="hidden lumen-modal-screen lumen-modal-screen--center">
+        <div class="lumen-panel lumen-panel--dialog disconnect-dialog card-glass">
+            <p class="lumen-modal-eyebrow disconnect-eyebrow">Connection</p>
+            <h2 class="modal-screen-title modal-screen-title--h2 disconnect-title">Match Ended</h2>
+            <p class="disconnect-msg">Your opponent has disconnected or forfeited the match.</p>
+            <button type="button" id="btn-disconnect-ok" class="menu-btn disconnect-ok-btn">Return to Menu</button>
         </div>
     </div>
-    <script src="js/game.js?v=37"></script>
+    <script src="js/game.js?v=42"></script>
 </body>
 </html>

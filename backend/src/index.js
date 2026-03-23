@@ -4,7 +4,8 @@ export default {
 
 		if (url.pathname === '/play') {
 			let charId = url.searchParams.get('char') || 'voidWeaver';
-			console.log(`[GameJoin] User: ${url.searchParams.get('uid')} Class: ${charId}`);
+			let skin = url.searchParams.get('skin') || 'Default';
+			console.log(`[GameJoin] User: ${url.searchParams.get('uid')} Class: ${charId} Skin: ${skin}`);
 			let playerId = url.searchParams.get('uid') || crypto.randomUUID();
 			let specificRoomId = url.searchParams.get('roomId');
 
@@ -23,7 +24,7 @@ export default {
 
 			let id = env.GAME_ROOM.idFromName(roomId); 
 			let room = env.GAME_ROOM.get(id);
-			return room.fetch(new Request(`http://internal/play?roomId=${roomId}&isNew=${isNew}&char=${charId}&uid=${playerId}`, request));
+			return room.fetch(new Request(`http://internal/play?roomId=${roomId}&isNew=${isNew}&char=${charId}&uid=${playerId}&skin=${skin}`, request));
 		}
 
 		if (url.pathname === '/profile') {
@@ -34,10 +35,28 @@ export default {
 			return profile.fetch(new Request(`http://internal/get-stats?uid=${uid}`));
 		}
 
-		if (url.pathname === '/set-username') {
+		if (url.pathname === '/set-username' || url.pathname === '/save-customization') {
 			if (request.method === 'OPTIONS') {
 				return new Response(null, { headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'Content-Type' } });
 			}
+			
+			if (url.pathname === '/save-customization') {
+				try {
+					const body = await request.json();
+					const uid = body.uid;
+					if (!uid) return new Response('Missing UID', { status: 400 });
+					let profileId = env.PLAYER_PROFILE.idFromName(uid);
+					let profile = env.PLAYER_PROFILE.get(profileId);
+					return profile.fetch(new Request('http://internal/save-customization', {
+						method: 'POST',
+						body: JSON.stringify(body),
+						headers: { 'Content-Type': 'application/json' }
+					}));
+				} catch(e) {
+					return new Response('Invalid Request', { status: 400 });
+				}
+			}
+
 			try {
 				const body = await request.json();
 				const uid = body.uid;
@@ -597,6 +616,7 @@ export class GameRoom {
 		const isNew = url.searchParams.get('isNew') === 'true';
 		const charId = url.searchParams.get('char');
 		const playerId = url.searchParams.get('uid');
+		const skinId = url.searchParams.get('skin') || 'Default';
 
 		// Handle initialization and abandoned queue check
 		const isPrivate = this.myRoomId && this.myRoomId.includes('private');
@@ -641,6 +661,7 @@ export class GameRoom {
 			level: 1,
 			class: classData.name,
 			classId: charId,
+			equippedSkin: skinId, // Priority: URL param (immediate)
 			uid: playerId,
 			username: 'Player',
 			abilities: classData.abilities.map(a => ({...a})),
