@@ -1,5 +1,27 @@
 # Lumen Clash
 
+## v1.2.0 — Responsive Polish & Character Rendering (2026-03-22)
+### Added
+- **Settings → Performance overlay**: Optional FPS readout plus approximate **HTTP ping** to `/profile` (round-trip latency), persisted in `localStorage`.
+- **Settings → Accessibility**: **Larger UI text**, **high contrast** shell for menus/HUD, **high-visibility HP bar** colors (blue vs amber), and **reduce motion** (cuts CSS animations/transitions).
+- **Settings → Combat feedback tuning**: Added user-selectable **Camera shake** and **Hit-stop** intensity levels (`Off`, `Medium`, `High`) that apply during damage reactions.
+- **Post-match breakdown**: XP splash now includes match stats (**damage dealt**, **damage taken**, **abilities used**, **turn swaps**) for quick self-review.
+- **Settings tabs**: Options are now organized into **Gameplay**, **Accessibility**, and **System** sections for faster navigation.
+- **Menu VFX toggle**: Added a gameplay setting to disable animated menu effects for cleaner visuals and lower distraction on mobile.
+- **Pretty changelog viewer**: In-game changelog now renders with readable formatting (headings, sections, bullets, emphasis) instead of plain raw text.
+
+### Changed
+- **Main menu responsiveness**: Improved behavior across different aspect ratios, including mobile-friendly layout adjustments and better stacking/spacing for narrow viewports.
+- **Mobile visual pass (global)**: Refined phone/tablet layout for menu, combat HUD, roster, modals, and splash screens; improved touch target sizing, spacing, and portrait readability.
+- **Mobile compact pass**: Reduced button footprint and reorganized portrait HUD flow to minimize overlap (health cards, status/timer, abilities, and emotes now fit with less collision on small screens).
+- **UI polish**: Added custom themed scrollbars across scrollable panels and lists.
+- **Selected hero presentation**: Active chosen character now appears behind the main menu UI layer for stronger visual identity while preserving menu readability.
+- **Void Weaver skin parity**: Fixed **Verdant Void Weaver** scale inconsistencies so it matches standard Void Weaver sizing in menu and battle scenes.
+- **Connection resilience**: Added temporary disconnect recovery with automatic reconnect attempts (up to 3) before falling back to manual return.
+
+### Fixed
+- **Sprite background artifacts**: Removed visible dark/black matte backgrounds from character sprites when rendered in Phaser and preview contexts.
+
 ## v1.1.0 — Main Menu & Presentation (2026-03-22)
 ### Added
 - **Animated menu backdrop**: Linked `background.css` and added the `#menu-background-layer` markup (nebula, particles, scanlines, vignette) so the main menu shows the intended background.

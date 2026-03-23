@@ -10,8 +10,8 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
     
-    <link rel="stylesheet" href="css/style.css?v=16">
-    <link rel="stylesheet" href="css/background.css?v=1">
+    <link rel="stylesheet" href="css/style.css?v=24">
+    <link rel="stylesheet" href="css/background.css?v=2">
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
     <script>
         // Ghost Hunter Debugger: Catch any click-stealers in the act
@@ -63,6 +63,28 @@
                 <div id="bp-splash-details" class="xp-splash-xp-details">0 / 100 Account XP</div>
             </div>
 
+            <div class="xp-module xp-splash-matchstats card-glass">
+                <div class="xp-splash-matchstats-head">Match Breakdown</div>
+                <div class="xp-splash-matchstats-grid">
+                    <div class="xp-stat-cell">
+                        <span class="xp-stat-label">Damage Dealt</span>
+                        <span id="splash-stat-dmg-dealt" class="xp-stat-value">0</span>
+                    </div>
+                    <div class="xp-stat-cell">
+                        <span class="xp-stat-label">Damage Taken</span>
+                        <span id="splash-stat-dmg-taken" class="xp-stat-value">0</span>
+                    </div>
+                    <div class="xp-stat-cell">
+                        <span class="xp-stat-label">Abilities Used</span>
+                        <span id="splash-stat-abilities" class="xp-stat-value">0</span>
+                    </div>
+                    <div class="xp-stat-cell">
+                        <span class="xp-stat-label">Turn Swaps</span>
+                        <span id="splash-stat-turns" class="xp-stat-value">0</span>
+                    </div>
+                </div>
+            </div>
+
             <div class="xp-splash-actions">
                 <button type="button" id="btn-rematch" class="menu-btn xp-splash-btn-rematch">
                     <span id="btn-rematch-label">Challenge Again</span>
@@ -73,20 +95,21 @@
         </div>
     </div>
 
+    <!-- Full-viewport nebula (below Phaser + menu UI so the hero can sit between layers) -->
+    <div id="menu-background-layer" aria-hidden="true">
+        <div class="nebula-cloud nebula-1"></div>
+        <div class="nebula-cloud nebula-2"></div>
+        <div class="nebula-cloud nebula-3"></div>
+        <div class="nebula-core"></div>
+        <div class="lumen-particles"></div>
+    </div>
+
     <div id="game-container">
         <!-- Phaser injects canvas here -->
     </div>
 
     <!-- MAIN MENU UI -->
     <div id="main-menu-container">
-        <div id="menu-background-layer" aria-hidden="true">
-            <div class="nebula-cloud nebula-1"></div>
-            <div class="nebula-cloud nebula-2"></div>
-            <div class="nebula-cloud nebula-3"></div>
-            <div class="nebula-core"></div>
-            <div class="lumen-particles"></div>
-        </div>
-
         <header class="main-menu-header">
             <div class="main-menu-brand">
                 <h1 class="game-title">Lumen Clash</h1>
@@ -286,11 +309,33 @@
             <p class="lumen-modal-eyebrow">Preferences</p>
             <h1 class="modal-screen-title">Settings</h1>
         </div>
-        <div class="lumen-panel lumen-panel--stack">
-            <button type="button" id="btn-sound-settings" class="lumen-settings-row">Sound: ON</button>
-            <button type="button" id="btn-emote-presets" class="lumen-settings-row">Emote presets</button>
-            <button type="button" id="btn-view-changelog" class="lumen-settings-row">Changelog</button>
-            <button type="button" id="btn-wipe-data" class="lumen-settings-row lumen-settings-row--danger">Wipe save data</button>
+        <div class="lumen-panel lumen-panel--stack settings-tabs-shell">
+            <div class="settings-tab-buttons" role="tablist" aria-label="Settings categories">
+                <button type="button" class="settings-tab-btn active" data-settings-tab="gameplay" role="tab" aria-selected="true">Gameplay</button>
+                <button type="button" class="settings-tab-btn" data-settings-tab="accessibility" role="tab" aria-selected="false">Accessibility</button>
+                <button type="button" class="settings-tab-btn" data-settings-tab="system" role="tab" aria-selected="false">System</button>
+            </div>
+
+            <div class="settings-tab-panel active" data-settings-tab-panel="gameplay" role="tabpanel">
+                <button type="button" id="btn-sound-settings" class="lumen-settings-row">Sound: ON</button>
+                <button type="button" id="btn-menu-vfx" class="lumen-settings-row">Menu VFX: ON</button>
+                <button type="button" id="btn-camera-shake" class="lumen-settings-row">Camera shake: Medium</button>
+                <button type="button" id="btn-hit-stop" class="lumen-settings-row">Hit-stop: Medium</button>
+                <button type="button" id="btn-emote-presets" class="lumen-settings-row">Emote presets</button>
+            </div>
+
+            <div class="settings-tab-panel" data-settings-tab-panel="accessibility" role="tabpanel">
+                <button type="button" id="btn-a11y-large-text" class="lumen-settings-row">Larger UI text: OFF</button>
+                <button type="button" id="btn-a11y-high-contrast" class="lumen-settings-row">High contrast UI: OFF</button>
+                <button type="button" id="btn-a11y-hp-bars" class="lumen-settings-row">HP bar colors: Default</button>
+                <button type="button" id="btn-reduce-motion" class="lumen-settings-row">Reduce motion: OFF</button>
+            </div>
+
+            <div class="settings-tab-panel" data-settings-tab-panel="system" role="tabpanel">
+                <button type="button" id="btn-perf-overlay" class="lumen-settings-row">Performance overlay: OFF</button>
+                <button type="button" id="btn-view-changelog" class="lumen-settings-row">Changelog</button>
+                <button type="button" id="btn-wipe-data" class="lumen-settings-row lumen-settings-row--danger">Wipe save data</button>
+            </div>
         </div>
         <button type="button" id="btn-close-settings" class="menu-btn secondary-btn btn-lumen-back">Back ↩</button>
     </div>
@@ -386,6 +431,12 @@
         </div>
     </div>
 
+    <div id="perf-overlay" class="perf-overlay hidden" aria-hidden="true">
+        <span id="perf-fps">— FPS</span>
+        <span class="perf-overlay-sep">·</span>
+        <span id="perf-ping">Ping —</span>
+    </div>
+
     <!-- Battle Pass Modal -->
     <div id="battle-pass-modal" class="modal hidden">
         <div class="modal-content">
@@ -456,17 +507,6 @@
         </div>
     </div>
 
-    <!-- ROTATE DEVICE OVERLAY (portrait only) -->
-    <div id="rotate-overlay">
-        <div class="rotate-content">
-            <div class="rotate-icon">📱↻</div>
-            <h2>Rotate Your Device</h2>
-            <p>Lumen Clash is best played in landscape mode</p>
-        </div>
-    </div>
-
-
-
     <!-- DISCONNECT MODAL -->
     <div id="disconnect-modal" class="hidden lumen-modal-screen lumen-modal-screen--center">
         <div class="lumen-panel lumen-panel--dialog disconnect-dialog card-glass">
@@ -476,6 +516,6 @@
             <button type="button" id="btn-disconnect-ok" class="menu-btn disconnect-ok-btn">Return to Menu</button>
         </div>
     </div>
-    <script src="js/game.js?v=42"></script>
+    <script src="js/game.js?v=50"></script>
 </body>
 </html>

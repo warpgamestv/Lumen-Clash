@@ -3,7 +3,7 @@ const config = {
     parent: 'game-container',
     width: document.getElementById('game-container').clientWidth,
     height: document.getElementById('game-container').clientHeight,
-    backgroundColor: '#050510',
+    transparent: true,
     scene: {
         preload: preload,
         create: create,
@@ -20,6 +20,24 @@ let game = null;
 function getGameContainer() {
     return document.getElementById('game-container');
 }
+
+/** Canvas is decorative on the main menu; during matches nothing on the canvas is clicked (abilities are HTML). */
+function syncGameContainerPointerEvents() {
+    const gc = getGameContainer();
+    if (!gc) return;
+    const mainHidden = document.getElementById('main-menu-container').classList.contains('hidden');
+    gc.style.pointerEvents = mainHidden ? 'auto' : 'none';
+}
+
+function syncRootLayoutClasses() {
+    const html = document.documentElement;
+    html.classList.toggle('layout-mobile', window.matchMedia('(max-width: 768px)').matches);
+    html.classList.toggle('layout-portrait', window.matchMedia('(orientation: portrait)').matches);
+}
+
+window.addEventListener('resize', syncRootLayoutClasses);
+syncRootLayoutClasses();
+syncGameContainerPointerEvents();
 
 function initGame() {
     if (game) return; // Already running
@@ -38,7 +56,9 @@ function destroyGame() {
     try {
         game.destroy(true); // true = remove canvas from DOM
         game = null;
-        // Specifically clear everything in case destroy() leaves ghosts
+        playerLeftShape = null;
+        playerRightShape = null;
+        phaserLayoutBattleMode = false;
         const container = document.getElementById('game-container');
         if (container) {
             container.innerHTML = '';
@@ -57,6 +77,19 @@ let myPlayerId = null;
 let gameState = null;
 let prevMyHealth = -1;
 let prevOpponentHealth = -1;
+let reconnectAttempts = 0;
+let reconnectTimer = null;
+let manualSocketClose = false;
+let lastRoomId = null;
+let lastTurnSnapshot = null;
+
+const matchStats = {
+    active: false,
+    damageDealt: 0,
+    damageTaken: 0,
+    abilitiesUsed: 0,
+    turnSwaps: 0
+};
 
 // Session persistence logic
 function generateUUID() {
@@ -76,6 +109,207 @@ if (!localUid) {
     localUid = generateUUID();
     localStorage.setItem('lumen_clash_uid', localUid);
 }
+
+// ============================================================
+// CLIENT PREFERENCES (perf overlay + accessibility)
+// ============================================================
+const PREF_KEYS = {
+    perfOverlay: 'lumen_clash_perf_overlay',
+    a11yLarge: 'lumen_clash_a11y_large',
+    a11yContrast: 'lumen_clash_a11y_contrast',
+    a11yHpAlt: 'lumen_clash_a11y_hp_alt',
+    reduceMotion: 'lumen_clash_reduce_motion',
+    menuVfxOff: 'lumen_clash_menu_vfx_off',
+    cameraShake: 'lumen_clash_camera_shake',
+    hitStop: 'lumen_clash_hit_stop'
+};
+
+function prefOn(key) {
+    return localStorage.getItem(key) === 'on';
+}
+
+function applyPreferenceClasses() {
+    const root = document.documentElement;
+    root.classList.toggle('pref-a11y-large', prefOn(PREF_KEYS.a11yLarge));
+    root.classList.toggle('pref-a11y-contrast', prefOn(PREF_KEYS.a11yContrast));
+    root.classList.toggle('pref-a11y-hp-alt', prefOn(PREF_KEYS.a11yHpAlt));
+    root.classList.toggle('pref-reduce-motion', prefOn(PREF_KEYS.reduceMotion));
+    root.classList.toggle('pref-menu-vfx-off', prefOn(PREF_KEYS.menuVfxOff));
+}
+
+let perfOverlayRunning = false;
+let perfRafId = null;
+let perfPingInterval = null;
+let perfFrames = 0;
+let perfLastStamp = performance.now();
+let perfLastPingMs = null;
+
+function syncPerfOverlayVisibility() {
+    const el = document.getElementById('perf-overlay');
+    if (!el) return;
+    const show = prefOn(PREF_KEYS.perfOverlay);
+    el.classList.toggle('hidden', !show);
+    el.setAttribute('aria-hidden', show ? 'false' : 'true');
+}
+
+function perfFrame(now) {
+    if (!prefOn(PREF_KEYS.perfOverlay)) {
+        perfOverlayRunning = false;
+        return;
+    }
+    perfFrames++;
+    const dt = now - perfLastStamp;
+    if (dt >= 500) {
+        const fps = Math.round((perfFrames * 1000) / dt);
+        perfFrames = 0;
+        perfLastStamp = now;
+        const fpsEl = document.getElementById('perf-fps');
+        if (fpsEl) fpsEl.textContent = `${fps} FPS`;
+        const pingEl = document.getElementById('perf-ping');
+        if (pingEl) {
+            pingEl.textContent = perfLastPingMs != null ? `Ping ${perfLastPingMs}ms` : 'Ping …';
+        }
+    }
+    perfRafId = requestAnimationFrame(perfFrame);
+}
+
+function measureProfilePing() {
+    if (!prefOn(PREF_KEYS.perfOverlay)) return;
+    const uid = localUid;
+    if (!uid) return;
+    const t0 = performance.now();
+    fetch(`/profile?uid=${encodeURIComponent(uid)}`, { cache: 'no-store' })
+        .then(() => {
+            perfLastPingMs = Math.round(performance.now() - t0);
+        })
+        .catch(() => {
+            perfLastPingMs = null;
+        });
+}
+
+function startPerfOverlayLoop() {
+    if (perfOverlayRunning) return;
+    perfOverlayRunning = true;
+    perfLastStamp = performance.now();
+    perfFrames = 0;
+    perfRafId = requestAnimationFrame(perfFrame);
+    measureProfilePing();
+    if (perfPingInterval) clearInterval(perfPingInterval);
+    perfPingInterval = setInterval(measureProfilePing, 5000);
+}
+
+function stopPerfOverlayLoop() {
+    perfOverlayRunning = false;
+    if (perfRafId) {
+        cancelAnimationFrame(perfRafId);
+        perfRafId = null;
+    }
+    if (perfPingInterval) {
+        clearInterval(perfPingInterval);
+        perfPingInterval = null;
+    }
+}
+
+function setPerfOverlayPref(enabled) {
+    localStorage.setItem(PREF_KEYS.perfOverlay, enabled ? 'on' : 'off');
+    syncPerfOverlayVisibility();
+    if (enabled) startPerfOverlayLoop();
+    else stopPerfOverlayLoop();
+}
+
+function initClientPreferences() {
+    applyPreferenceClasses();
+    syncPerfOverlayVisibility();
+    if (prefOn(PREF_KEYS.perfOverlay)) startPerfOverlayLoop();
+}
+
+function toggleStoredPref(key) {
+    if (prefOn(key)) {
+        localStorage.removeItem(key);
+        return false;
+    }
+    localStorage.setItem(key, 'on');
+    return true;
+}
+
+function getLevelPref(key, fallback = 'medium') {
+    const val = localStorage.getItem(key);
+    if (!val) return fallback;
+    return val;
+}
+
+function cycleLevelPref(key) {
+    const order = ['off', 'medium', 'high'];
+    const current = getLevelPref(key);
+    const idx = order.indexOf(current);
+    const next = order[(idx + 1 + order.length) % order.length];
+    localStorage.setItem(key, next);
+    return next;
+}
+
+function toTitleCaseLevel(val) {
+    if (val === 'off') return 'Off';
+    if (val === 'high') return 'High';
+    return 'Medium';
+}
+
+function cameraShakeAmount() {
+    const level = getLevelPref(PREF_KEYS.cameraShake);
+    if (level === 'off') return 0;
+    if (level === 'high') return 0.03;
+    return 0.015;
+}
+
+function hitStopMs() {
+    const level = getLevelPref(PREF_KEYS.hitStop);
+    if (level === 'off') return 0;
+    if (level === 'high') return 90;
+    return 45;
+}
+
+function refreshPreferenceSettingsLabels() {
+    const perfBtn = document.getElementById('btn-perf-overlay');
+    if (perfBtn) perfBtn.textContent = `Performance overlay: ${prefOn(PREF_KEYS.perfOverlay) ? 'ON' : 'OFF'}`;
+    const largeBtn = document.getElementById('btn-a11y-large-text');
+    if (largeBtn) largeBtn.textContent = `Larger UI text: ${prefOn(PREF_KEYS.a11yLarge) ? 'ON' : 'OFF'}`;
+    const conBtn = document.getElementById('btn-a11y-high-contrast');
+    if (conBtn) conBtn.textContent = `High contrast UI: ${prefOn(PREF_KEYS.a11yContrast) ? 'ON' : 'OFF'}`;
+    const hpBtn = document.getElementById('btn-a11y-hp-bars');
+    if (hpBtn) hpBtn.textContent = `HP bar colors: ${prefOn(PREF_KEYS.a11yHpAlt) ? 'High-visibility' : 'Default'}`;
+    const rmBtn = document.getElementById('btn-reduce-motion');
+    if (rmBtn) rmBtn.textContent = `Reduce motion: ${prefOn(PREF_KEYS.reduceMotion) ? 'ON' : 'OFF'}`;
+    const vfxBtn = document.getElementById('btn-menu-vfx');
+    if (vfxBtn) vfxBtn.textContent = `Menu VFX: ${prefOn(PREF_KEYS.menuVfxOff) ? 'OFF' : 'ON'}`;
+    const csBtn = document.getElementById('btn-camera-shake');
+    if (csBtn) csBtn.textContent = `Camera shake: ${toTitleCaseLevel(getLevelPref(PREF_KEYS.cameraShake))}`;
+    const hsBtn = document.getElementById('btn-hit-stop');
+    if (hsBtn) hsBtn.textContent = `Hit-stop: ${toTitleCaseLevel(getLevelPref(PREF_KEYS.hitStop))}`;
+}
+
+function initSettingsTabs() {
+    const tabButtons = Array.from(document.querySelectorAll('.settings-tab-btn'));
+    const panels = Array.from(document.querySelectorAll('.settings-tab-panel'));
+    if (!tabButtons.length || !panels.length) return;
+
+    function activate(tabName) {
+        tabButtons.forEach((btn) => {
+            const active = btn.dataset.settingsTab === tabName;
+            btn.classList.toggle('active', active);
+            btn.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+        panels.forEach((panel) => {
+            panel.classList.toggle('active', panel.dataset.settingsTabPanel === tabName);
+        });
+    }
+
+    tabButtons.forEach((btn) => {
+        btn.addEventListener('click', () => activate(btn.dataset.settingsTab));
+    });
+    activate('gameplay');
+}
+
+initClientPreferences();
+initSettingsTabs();
 
 // ============================================================
 // PROCEDURAL SOUND MANAGER  (AudioContext — no audio files)
@@ -349,6 +583,145 @@ const BP_REWARDS = {
     20: { type: 'skin', id: 'legend', name: 'Lumen Legend' }
 };
 
+/** RGB max channel at or below this → alpha 0 (removes flat black / dark matte backdrops on PNGs). */
+const CHAR_BITMAP_NEAR_BLACK_THRESHOLD = 28;
+const CHARACTER_TEXTURE_KEYS_FOR_KNOCKOUT = ['voidWeaver', 'voidWeaver_green', 'aegisKnight', 'lumenSage'];
+
+const characterPreviewImageCache = Object.create(null);
+
+function processCharacterBitmap(source, threshold = CHAR_BITMAP_NEAR_BLACK_THRESHOLD) {
+    const w = source.naturalWidth || source.width;
+    const h = source.naturalHeight || source.height;
+    if (!w || !h) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(source, 0, 0);
+    const imageData = ctx.getImageData(0, 0, w, h);
+    const d = imageData.data;
+    for (let i = 0; i < d.length; i += 4) {
+        const r = d[i];
+        const g = d[i + 1];
+        const b = d[i + 2];
+        if (Math.max(r, g, b) <= threshold) {
+            d[i + 3] = 0;
+        }
+    }
+    ctx.putImageData(imageData, 0, 0);
+    return canvas;
+}
+
+function getTextureSourceImage(texture) {
+    if (texture && typeof texture.getSourceImage === 'function') return texture.getSourceImage();
+    const s0 = texture && texture.source && texture.source[0];
+    return s0 && s0.image ? s0.image : null;
+}
+
+/** void_weaver_green.png is often exported at a different resolution than void_weaver.png */
+function voidWeaverTextureScaleFactor(scene, textureKey) {
+    if (textureKey !== 'voidWeaver_green') return 1;
+    if (!scene || !scene.textures.exists('voidWeaver') || !scene.textures.exists('voidWeaver_green')) return 1;
+    const base = getTextureSourceImage(scene.textures.get('voidWeaver'));
+    const grn = getTextureSourceImage(scene.textures.get('voidWeaver_green'));
+    if (!base || !grn) return 1;
+    const bw = base.naturalWidth || base.width;
+    const bh = base.naturalHeight || base.height;
+    const gw = grn.naturalWidth || grn.width;
+    const gh = grn.naturalHeight || grn.height;
+    if (!bw || !bh || !gw || !gh) return 1;
+    return Math.min(bw / gw, bh / gh);
+}
+
+function computePhaserSpriteBaseScales() {
+    const gc = getGameContainer();
+    if (!gc) return null;
+    const cw = gc.clientWidth;
+    const ch = gc.clientHeight;
+    const inBattle = shouldUseBattleSpriteLayout();
+    if (inBattle) {
+        const s = Math.min(0.45, ch / 900);
+        return { inBattle: true, leftBase: s, rightBase: s };
+    }
+    const narrowPortrait = document.documentElement.classList.contains('layout-portrait') && cw < 900;
+    const mobile = document.documentElement.classList.contains('layout-mobile') || narrowPortrait;
+    const portraitBoost = narrowPortrait ? 1.06 : 1;
+    const baseScale = (mobile ? Math.min(0.58, ch / 760) : Math.min(0.68, ch / 700)) * portraitBoost;
+    return { inBattle: false, leftBase: baseScale, rightBase: baseScale };
+}
+
+function applyPhaserCharacterScales(scene) {
+    if (!playerLeftShape || !playerRightShape || !scene) return;
+    const cfg = computePhaserSpriteBaseScales();
+    if (!cfg) return;
+    if (cfg.inBattle) {
+        playerLeftShape.setScale(cfg.leftBase * voidWeaverTextureScaleFactor(scene, playerLeftShape.texture.key)).setFlipX(false);
+        playerRightShape.setScale(cfg.rightBase * voidWeaverTextureScaleFactor(scene, playerRightShape.texture.key)).setFlipX(true);
+    } else {
+        playerLeftShape.setScale(cfg.leftBase * voidWeaverTextureScaleFactor(scene, playerLeftShape.texture.key)).setFlipX(false);
+    }
+}
+
+function applyCharacterTextureAlphaKnockout(scene) {
+    CHARACTER_TEXTURE_KEYS_FOR_KNOCKOUT.forEach((key) => {
+        try {
+            if (!scene.textures.exists(key)) return;
+            const texture = scene.textures.get(key);
+            const src = getTextureSourceImage(texture);
+            if (!src || !(src.naturalWidth || src.width)) return;
+            const processed = processCharacterBitmap(src, CHAR_BITMAP_NEAR_BLACK_THRESHOLD);
+            if (!processed) return;
+            scene.textures.remove(key);
+            const canvasTex = scene.textures.addCanvas(key, processed);
+            if (canvasTex && typeof canvasTex.refresh === 'function') canvasTex.refresh();
+        } catch (e) {
+            console.warn('[Lumen] Texture alpha knockout failed for', key, e);
+        }
+    });
+}
+
+function characterPreviewAssetUrl(charId, skinLabel) {
+    if (charId === 'voidWeaver' && skinLabel === 'Verdant') {
+        return 'assets/void_weaver_green.png?v=1';
+    }
+    const base = charId === 'aegisKnight' ? 'aegis_knight' : charId === 'lumenSage' ? 'lumen_sage' : 'void_weaver';
+    return `assets/${base}.png?v=2`;
+}
+
+function refreshCharacterPreviewImg() {
+    const container = document.getElementById('char-preview-sprite-container');
+    if (!container) return;
+    const skinEl = document.getElementById('current-skin-name');
+    const skinLabel = skinEl ? skinEl.innerText.trim() : 'Default';
+    const cacheKey = `${currentPreviewCharId}|${skinLabel}`;
+    if (characterPreviewImageCache[cacheKey]) {
+        mountPreviewImg(container, characterPreviewImageCache[cacheKey]);
+        return;
+    }
+    const url = characterPreviewAssetUrl(currentPreviewCharId, skinLabel);
+    const im = new Image();
+    im.onload = () => {
+        const canvas = processCharacterBitmap(im, CHAR_BITMAP_NEAR_BLACK_THRESHOLD);
+        if (!canvas) return;
+        const dataUrl = canvas.toDataURL('image/png');
+        characterPreviewImageCache[cacheKey] = dataUrl;
+        mountPreviewImg(container, dataUrl);
+    };
+    im.onerror = () => {
+        container.innerHTML = '';
+    };
+    im.src = url;
+}
+
+function mountPreviewImg(container, dataUrl) {
+    container.innerHTML = '';
+    const el = document.createElement('img');
+    el.className = 'lumen-character-sprite';
+    el.src = dataUrl;
+    el.alt = '';
+    container.appendChild(el);
+}
+
 // Phaser Scene functions
 function preload() {
     this.load.image('voidWeaver', 'assets/void_weaver.png?v=2');
@@ -359,8 +732,46 @@ function preload() {
 
 let playerLeftShape;
 let playerRightShape;
+let phaserLayoutBattleMode = false;
+
+function menuHeroTextureKey(charId) {
+    let key = charId;
+    const skin = playerProfileData && playerProfileData.equippedSkins && playerProfileData.equippedSkins[charId];
+    if (skin === 'Verdant' && charId === 'voidWeaver') key = 'voidWeaver_green';
+    return key;
+}
+
+function shouldUseBattleSpriteLayout() {
+    return !!(gameState && gameState.status === 'IN_PROGRESS' && myPlayerId);
+}
+
+function refreshPhaserCharacterLayout() {
+    if (!playerLeftShape || !playerRightShape || !playerLeftShape.scene) return;
+    const scene = playerLeftShape.scene;
+    const gc = getGameContainer();
+    if (!gc) return;
+    const cw = gc.clientWidth;
+    const ch = gc.clientHeight;
+    const inBattle = shouldUseBattleSpriteLayout();
+
+    if (inBattle) {
+        playerRightShape.setVisible(true);
+        const spriteY = ch * 0.35;
+        playerLeftShape.setPosition(cw * 0.25, spriteY);
+        playerRightShape.setPosition(cw * 0.75, spriteY);
+    } else {
+        playerRightShape.setVisible(false);
+        const narrowPortrait = document.documentElement.classList.contains('layout-portrait') && cw < 900;
+        const spriteX = narrowPortrait ? cw * 0.5 : cw * 0.4;
+        const spriteY = narrowPortrait ? ch * 0.34 : ch * 0.4;
+        playerLeftShape.setPosition(spriteX, spriteY);
+    }
+    applyPhaserCharacterScales(scene);
+}
 
 function create() {
+    applyCharacterTextureAlphaKnockout(this);
+
     // Add some starry/sci-fi background particles
     const particles = this.add.particles(0, 0, 'dummy', {
         x: { min: 0, max: this.scale.width },
@@ -380,20 +791,17 @@ function create() {
     graphics.generateTexture('dot', 4, 4);
     particles.setTexture('dot');
 
-    // Dynamic sprite scale based on screen height
     const container = document.getElementById('game-container');
     const ch = container ? container.clientHeight : 600;
     const cw = container ? container.clientWidth : 800;
-    const spriteScale = Math.min(0.45, ch / 900); // Slightly smaller to fit better
-    const spriteY = ch * 0.35; // Lifted more to guarantee clearance of bottom HUD
+    const startCharId = CHARACTER_CLASSES[selectedCharacterIndex] ? CHARACTER_CLASSES[selectedCharacterIndex].id : 'aegisKnight';
+    const startTex = menuHeroTextureKey(startCharId);
 
-    // Default Left Shape
-    playerLeftShape = this.add.sprite(cw * 0.25, spriteY, 'voidWeaver');
-    playerLeftShape.setScale(spriteScale).setBlendMode(Phaser.BlendModes.SCREEN);
-    
-    // Default Right Shape
-    playerRightShape = this.add.sprite(cw * 0.75, spriteY, 'voidWeaver');
-    playerRightShape.setScale(spriteScale).setFlipX(true).setBlendMode(Phaser.BlendModes.SCREEN);
+    playerLeftShape = this.add.sprite(cw * 0.4, ch * 0.4, startTex);
+
+    playerRightShape = this.add.sprite(cw * 0.75, ch * 0.35, 'voidWeaver');
+
+    refreshPhaserCharacterLayout();
 
     // Tweens for idle breathing effect
     this.tweens.add({
@@ -412,10 +820,56 @@ function update() {
     // Real-time animation logic can go here
 }
 
+function resetMatchStats() {
+    matchStats.active = true;
+    matchStats.damageDealt = 0;
+    matchStats.damageTaken = 0;
+    matchStats.abilitiesUsed = 0;
+    matchStats.turnSwaps = 0;
+    lastTurnSnapshot = null;
+}
+
+function endMatchStatsSession() {
+    matchStats.active = false;
+}
+
+function clearReconnectTimer() {
+    if (!reconnectTimer) return;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+}
+
+function scheduleReconnect() {
+    if (manualSocketClose) return;
+    const inMatchFlow = gameState && (gameState.status === 'IN_PROGRESS' || gameState.status === 'WAITING_FOR_PLAYERS');
+    if (!inMatchFlow) return;
+    if (reconnectAttempts >= 3) {
+        document.getElementById('matchmaking-text').innerText = "Connection lost. Please return to menu.";
+        document.getElementById('status-message').innerText = "Disconnected from server.";
+        document.getElementById('ability-bar').classList.add('hidden');
+        document.getElementById('btn-return').classList.remove('hidden');
+        return;
+    }
+    const delayMs = 1200 * (reconnectAttempts + 1);
+    reconnectAttempts += 1;
+    document.getElementById('matchmaking-overlay').classList.remove('hidden');
+    document.getElementById('matchmaking-text').innerText = `Reconnecting... (${reconnectAttempts}/3)`;
+    clearReconnectTimer();
+    reconnectTimer = setTimeout(() => {
+        connectWebSocket(lastRoomId);
+    }, delayMs);
+}
+
 function connectWebSocket(specificRoomId = null) {
     if (socket) {
-        try { socket.close(); } catch(e) {}
+        manualSocketClose = true;
+        try {
+            socket.onclose = null;
+            socket.close();
+        } catch(e) {}
     }
+    manualSocketClose = false;
+    if (specificRoomId) lastRoomId = specificRoomId;
     // Append chosen character class
     const charId = CHARACTER_CLASSES[selectedCharacterIndex].id;
     // Connect to Node.js proxy to bypass Firewall issues on Windows
@@ -427,15 +881,20 @@ function connectWebSocket(specificRoomId = null) {
 
     socket.onopen = () => {
         console.log("Connected to game server");
+        reconnectAttempts = 0;
+        clearReconnectTimer();
         document.getElementById('status-message').innerText = "Connected. Waiting for opponent...";
     };
 
     socket.onmessage = (event) => {
         const msg = JSON.parse(event.data);
         if (msg.type === 'STATE_UPDATE') {
-            if (msg.me && !myPlayerId) {
+            // Always trust server assignment; rematches may swap p1/p2.
+            if (msg.me && myPlayerId !== msg.me) {
                 myPlayerId = msg.me;
                 console.log("Joined as " + myPlayerId);
+                prevMyHealth = -1;
+                prevOpponentHealth = -1;
             }
             gameState = msg.state;
             updateUI();
@@ -459,6 +918,7 @@ function connectWebSocket(specificRoomId = null) {
 
     socket.onclose = (event) => {
         console.log("WebSocket closed", event);
+        if (manualSocketClose) return;
         if (event.code === 4000) {
             connectWebSocket();
             return;
@@ -474,10 +934,7 @@ function connectWebSocket(specificRoomId = null) {
 
         document.getElementById('matchmaking-text').innerText = "Disconnected from server.";
         document.getElementById('status-message').innerText = "Disconnected from server.";
-        
-        // Hide abilities and show return on generic disconnect
-        document.getElementById('ability-bar').classList.add('hidden');
-        document.getElementById('btn-return').classList.remove('hidden');
+        scheduleReconnect();
     };
 }
 
@@ -488,6 +945,29 @@ function hideVictorySplashForActiveMatch() {
     splash.classList.add('hidden');
     splash.classList.remove('active-showing');
     splash.style.display = '';
+}
+
+function triggerDamageFeedback(scene, damagedSprite, counterSprite, hurtKickX, counterKickX) {
+    if (!scene || !damagedSprite || !damagedSprite.active) return;
+    const shake = cameraShakeAmount();
+    if (shake > 0 && scene.cameras && scene.cameras.main) {
+        scene.cameras.main.shake(100, shake, true);
+    }
+    const stopMs = hitStopMs();
+    if (stopMs > 0 && scene.tweens) {
+        scene.tweens.timeScale = 0.01;
+        setTimeout(() => {
+            if (scene && scene.tweens) scene.tweens.timeScale = 1;
+        }, stopMs);
+    }
+    scene.tweens.add({ targets: damagedSprite, x: hurtKickX, yoyo: true, duration: 50, repeat: 3 });
+    damagedSprite.setTintFill(0xff0000);
+    setTimeout(() => {
+        if (damagedSprite && damagedSprite.active) damagedSprite.clearTint();
+    }, 200);
+    if (counterSprite && counterSprite.active) {
+        scene.tweens.add({ targets: counterSprite, x: counterKickX, duration: 150, yoyo: true });
+    }
 }
 
 function updateUI() {
@@ -517,6 +997,7 @@ function updateUI() {
 
     // Update Health Bars & Animations
     if (gameState.status === 'IN_PROGRESS' && myPlayerId) {
+        if (!matchStats.active) resetMatchStats();
         const opponentId = myPlayerId === 'p1' ? 'p2' : 'p1';
 
         const myPlayer = gameState.players[myPlayerId];
@@ -532,21 +1013,17 @@ function updateUI() {
             if (myPlayer.equippedSkin === 'Verdant' && myPlayer.classId === 'voidWeaver') textureKey = 'voidWeaver_green';
             if (playerLeftShape.active && playerLeftShape.texture.key !== textureKey) {
                 playerLeftShape.setTexture(textureKey);
+                applyPhaserCharacterScales(playerLeftShape.scene);
             }
         }
 
         if (prevMyHealth !== -1 && myPlayer.health < prevMyHealth && playerLeftShape && playerLeftShape.active && game && game.scene) {
+            matchStats.damageTaken += (prevMyHealth - myPlayer.health);
             const scene = game.scene.scenes[0];
             if (scene) {
-                scene.tweens.add({ targets: playerLeftShape, x: '+=10', yoyo: true, duration: 50, repeat: 3 });
-                playerLeftShape.setTintFill(0xff0000);
-                setTimeout(() => { if (playerLeftShape && playerLeftShape.active) playerLeftShape.clearTint(); }, 200);
+                triggerDamageFeedback(scene, playerLeftShape, playerRightShape, '+=10', '-=50');
             }
             sfx.playHit();
-            
-            if (playerRightShape && playerRightShape.active && scene) { 
-                scene.tweens.add({ targets: playerRightShape, x: '-=50', duration: 150, yoyo: true });
-            }
         }
         prevMyHealth = myPlayer.health;
 
@@ -560,23 +1037,24 @@ function updateUI() {
             if (oppPlayer.equippedSkin === 'Verdant' && oppPlayer.classId === 'voidWeaver') textureKey = 'voidWeaver_green';
             if (playerRightShape.active && playerRightShape.texture.key !== textureKey) {
                 playerRightShape.setTexture(textureKey);
+                applyPhaserCharacterScales(playerRightShape.scene);
             }
         }
 
         if (prevOpponentHealth !== -1 && oppPlayer.health < prevOpponentHealth && playerRightShape && playerRightShape.active && game && game.scene) {
+            matchStats.damageDealt += (prevOpponentHealth - oppPlayer.health);
             const scene = game.scene.scenes[0];
             if (scene) {
-                scene.tweens.add({ targets: playerRightShape, x: '-=10', yoyo: true, duration: 50, repeat: 3 });
-                playerRightShape.setTintFill(0xff0000);
-                setTimeout(() => { if (playerRightShape && playerRightShape.active) playerRightShape.clearTint(); }, 200);
+                triggerDamageFeedback(scene, playerRightShape, playerLeftShape, '-=10', '+=50');
             }
             sfx.playHit();
-            
-            if (playerLeftShape && playerLeftShape.active && scene) {
-                scene.tweens.add({ targets: playerLeftShape, x: '+=50', duration: 150, yoyo: true });
-            }
         }
         prevOpponentHealth = oppPlayer.health;
+
+        if (lastTurnSnapshot !== null && lastTurnSnapshot !== gameState.turn) {
+            matchStats.turnSwaps += 1;
+        }
+        lastTurnSnapshot = gameState.turn;
     }
 
     if (gameState.status === 'WAITING_FOR_PLAYERS') {
@@ -670,7 +1148,15 @@ function updateUI() {
         // If not game over, ensure splash is hidden (rematch started or quit)
         document.getElementById('xp-splash-overlay').classList.add('hidden');
         document.getElementById('xp-splash-overlay').classList.remove('active-showing');
+        if (gameState.status !== 'IN_PROGRESS') endMatchStatsSession();
     }
+
+    const nowBattle = shouldUseBattleSpriteLayout();
+    if (nowBattle !== phaserLayoutBattleMode) {
+        phaserLayoutBattleMode = nowBattle;
+        refreshPhaserCharacterLayout();
+    }
+    syncGameContainerPointerEvents();
 }
 
 // Turn timer client-side display
@@ -754,11 +1240,16 @@ function updateMenuCharacterDisplay() {
     if (!char) return;
     document.getElementById('menu-char-name').innerText = char.name;
     document.getElementById('menu-char-stats').innerHTML = char.stats;
-    
-    // If we have profile data, show the level on the menu too
+
     if (playerProfileData && playerProfileData.classes[char.id]) {
         const pClass = playerProfileData.classes[char.id];
         document.getElementById('menu-char-name').innerText = `${char.name} (Lv. ${pClass.level})`;
+    }
+
+    const tex = menuHeroTextureKey(char.id);
+    if (playerLeftShape && playerLeftShape.active) {
+        playerLeftShape.setTexture(tex);
+        refreshPhaserCharacterLayout();
     }
 }
 
@@ -825,16 +1316,6 @@ document.getElementById('btn-save-username').addEventListener('click', async () 
         errorEl.classList.remove('hidden');
     }
 });
-
-function updateCharacterMenu() {
-    const char = CHARACTER_CLASSES[selectedCharacterIndex];
-    document.getElementById('menu-char-name').innerText = char.name;
-    document.getElementById('menu-char-stats').innerHTML = char.stats;
-
-    if (playerLeftShape) {
-        playerLeftShape.setTexture(char.id);
-    }
-}
 
 // Social Button
 document.getElementById('btn-social').addEventListener('click', () => {
@@ -1073,6 +1554,7 @@ document.querySelectorAll('.ability-btn').forEach(btn => {
         if (socket && socket.readyState === WebSocket.OPEN) {
             const idx = parseInt(btn.dataset.index);
             socket.send(JSON.stringify({ action: 'ability', abilityIndex: idx }));
+            if (matchStats.active) matchStats.abilitiesUsed += 1;
             sfx.playAttack();
             // Quick attack animation
             if (playerLeftShape && idx <= 1) {
@@ -1093,7 +1575,10 @@ document.getElementById('btn-disconnect-ok').addEventListener('click', () => {
 });
 
 document.getElementById('btn-return').addEventListener('click', () => {
+    clearReconnectTimer();
+    reconnectAttempts = 0;
     if (socket && socket.readyState === WebSocket.OPEN) {
+        manualSocketClose = true;
         socket.close(1000, "User Left Screen");
     }
     
@@ -1127,14 +1612,17 @@ document.getElementById('btn-return').addEventListener('click', () => {
     document.getElementById('hp-left').style.width = '100%';
     document.getElementById('hp-right').style.width = '100%';
 
-    // Visually reset sprites
-    const gc = getGameContainer();
-    if (gc) {
-        const resetY = gc.clientHeight * 0.35;
-        const resetScale = Math.min(0.45, gc.clientHeight / 900);
-        if (playerLeftShape) playerLeftShape.setPosition(gc.clientWidth * 0.25, resetY).setScale(resetScale).clearTint();
-        if (playerRightShape) playerRightShape.setPosition(gc.clientWidth * 0.75, resetY).setScale(resetScale).clearTint();
-    }
+    initGame();
+    const layoutWhenReady = () => {
+        if (playerLeftShape && playerLeftShape.scene) {
+            updateMenuCharacterDisplay();
+            refreshPhaserCharacterLayout();
+            syncGameContainerPointerEvents();
+        } else {
+            requestAnimationFrame(layoutWhenReady);
+        }
+    };
+    requestAnimationFrame(layoutWhenReady);
 
     // Reset multiplayer state
     myPlayerId = null;
@@ -1193,21 +1681,11 @@ function updateLeaderboardUI(data) {
 
 // Window resize handling for Phaser canvas
 window.addEventListener('resize', () => {
+    syncRootLayoutClasses();
     const gc = getGameContainer();
     if (!gc || !game || !game.scale) return;
-    const cw = gc.clientWidth;
-    const ch = gc.clientHeight;
-    game.scale.resize(cw, ch);
-    const resizeY = ch * 0.35;
-    const resizeScale = Math.min(0.45, ch / 900);
-    if (playerLeftShape) {
-        playerLeftShape.setPosition(cw * 0.25, resizeY);
-        playerLeftShape.setScale(resizeScale);
-    }
-    if (playerRightShape) {
-        playerRightShape.setPosition(cw * 0.75, resizeY);
-        playerRightShape.setScale(resizeScale);
-    }
+    game.scale.resize(gc.clientWidth, gc.clientHeight);
+    refreshPhaserCharacterLayout();
 });
 
 // Settings & Profile UI Logic
@@ -1221,6 +1699,10 @@ document.getElementById('btn-close-profile').addEventListener('click', () => {
 
 document.getElementById('btn-settings').addEventListener('click', () => {
     document.getElementById('settings-container').classList.remove('hidden');
+    const firstTab = document.querySelector('.settings-tab-btn[data-settings-tab="gameplay"]');
+    if (firstTab) firstTab.click();
+    refreshPreferenceSettingsLabels();
+    updateSoundBtn();
 });
 document.getElementById('btn-close-settings').addEventListener('click', () => {
     document.getElementById('settings-container').classList.add('hidden');
@@ -1245,18 +1727,95 @@ if (btnWipe) {
 }
 
 const btnViewChangelog = document.getElementById('btn-view-changelog');
+
+function escapeHtml(text) {
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function renderInlineMarkdown(text) {
+    let out = escapeHtml(text);
+    out = out.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+    return out;
+}
+
+function renderChangelogMarkdown(markdown) {
+    const lines = markdown.split(/\r?\n/);
+    const html = [];
+    let inList = false;
+
+    const closeList = () => {
+        if (inList) {
+            html.push('</ul>');
+            inList = false;
+        }
+    };
+
+    for (const raw of lines) {
+        const line = raw.trimEnd();
+        const trimmed = line.trim();
+
+        if (!trimmed) {
+            closeList();
+            continue;
+        }
+
+        if (trimmed.startsWith('### ')) {
+            closeList();
+            html.push(`<h3>${renderInlineMarkdown(trimmed.slice(4))}</h3>`);
+            continue;
+        }
+        if (trimmed.startsWith('## ')) {
+            closeList();
+            html.push(`<h2>${renderInlineMarkdown(trimmed.slice(3))}</h2>`);
+            continue;
+        }
+        if (trimmed.startsWith('# ')) {
+            closeList();
+            html.push(`<h1>${renderInlineMarkdown(trimmed.slice(2))}</h1>`);
+            continue;
+        }
+        if (trimmed.startsWith('- ')) {
+            if (!inList) {
+                html.push('<ul>');
+                inList = true;
+            }
+            html.push(`<li>${renderInlineMarkdown(trimmed.slice(2))}</li>`);
+            continue;
+        }
+        if (/^\d+\.\s+/.test(trimmed)) {
+            closeList();
+            html.push(`<p class="changelog-ordered-line">${renderInlineMarkdown(trimmed)}</p>`);
+            continue;
+        }
+
+        closeList();
+        html.push(`<p>${renderInlineMarkdown(trimmed)}</p>`);
+    }
+
+    closeList();
+    return html.join('');
+}
+
 if (btnViewChangelog) {
     btnViewChangelog.addEventListener('click', async () => {
         document.getElementById('changelog-modal').classList.remove('hidden');
         const contentDiv = document.getElementById('changelog-content');
-        if (contentDiv) contentDiv.innerText = "Loading changelog...";
+        if (contentDiv) contentDiv.innerHTML = '<p class="changelog-loading">Loading changelog...</p>';
         try {
             const res = await fetch(`http://${window.location.hostname}:8083/changelog`);
             if (!res.ok) throw new Error("Changelog not found");
             const text = await res.text();
-            if (contentDiv) contentDiv.innerText = text;
+            if (contentDiv) {
+                contentDiv.innerHTML = renderChangelogMarkdown(text);
+            }
         } catch (e) {
-            if (contentDiv) contentDiv.innerText = "Failed to load changelog. Make sure the local server is running.";
+            if (contentDiv) contentDiv.innerHTML = '<p class="changelog-error">Failed to load changelog. Make sure the local server is running.</p>';
         }
     });
 }
@@ -1414,6 +1973,7 @@ function updateSkinPreview() {
     if (currentSkinIndex === -1) currentSkinIndex = 0;
 
     document.getElementById('current-skin-name').innerText = skins[currentSkinIndex];
+    refreshCharacterPreviewImg();
 }
 
 function nextSkin() {
@@ -1423,6 +1983,7 @@ function nextSkin() {
     if (playerProfileData.level >= 20) skins.push('Lumen Legend');
     currentSkinIndex = (currentSkinIndex + 1) % skins.length;
     document.getElementById('current-skin-name').innerText = skins[currentSkinIndex];
+    refreshCharacterPreviewImg();
 }
 
 function prevSkin() {
@@ -1432,6 +1993,7 @@ function prevSkin() {
     if (playerProfileData.level >= 20) skins.push('Lumen Legend');
     currentSkinIndex = (currentSkinIndex - 1 + skins.length) % skins.length;
     document.getElementById('current-skin-name').innerText = skins[currentSkinIndex];
+    refreshCharacterPreviewImg();
 }
 
 async function saveCustomization() {
@@ -1457,22 +2019,41 @@ async function saveCustomization() {
 
 // Fail-safe global handlers for Splash Screen
 window.handleSplashExit = function() {
+    clearReconnectTimer();
+    reconnectAttempts = 0;
     console.log("[Splash] Exit clicked");
     const splash = document.getElementById('xp-splash-overlay');
     if (splash) {
         splash.classList.add('hidden');
         // Keep .active-showing while gameState may still be GAME_OVER, or updateUI() will show the splash again.
     }
-    if (socket) socket.close();
+    if (socket) {
+        manualSocketClose = true;
+        socket.close();
+    }
 
     document.getElementById('ui-container').classList.add('hidden');
     document.getElementById('matchmaking-overlay').classList.add('hidden');
     document.getElementById('main-menu-container').classList.remove('hidden');
 
+    if (!game) initGame();
+    const layoutWhenReady = () => {
+        if (playerLeftShape && playerLeftShape.scene) {
+            updateMenuCharacterDisplay();
+            refreshPhaserCharacterLayout();
+            syncGameContainerPointerEvents();
+        } else {
+            requestAnimationFrame(layoutWhenReady);
+        }
+    };
+    requestAnimationFrame(layoutWhenReady);
+
     updateUI();
 };
 
 window.handleSplashRematch = function() {
+    clearReconnectTimer();
+    reconnectAttempts = 0;
     console.log("[Splash] Rematch clicked");
     if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ action: 'rematch' }));
@@ -1507,6 +2088,10 @@ async function showXPSplash(won, pg) {
     const bpFill = document.getElementById('bp-splash-fill');
     const bpDetails = document.getElementById('bp-splash-details');
     const bpXpGained = document.getElementById('bp-splash-xp-gained');
+    const statDealt = document.getElementById('splash-stat-dmg-dealt');
+    const statTaken = document.getElementById('splash-stat-dmg-taken');
+    const statAbilities = document.getElementById('splash-stat-abilities');
+    const statTurns = document.getElementById('splash-stat-turns');
 
     if (!splash) {
         console.error("[Splash] FATAL: Overlay element not found");
@@ -1549,6 +2134,11 @@ async function showXPSplash(won, pg) {
     }
     const rmStatus = document.getElementById('rematch-status');
     if (rmStatus) rmStatus.innerText = '';
+
+    if (statDealt) statDealt.innerText = String(Math.max(0, Math.round(matchStats.damageDealt || 0)));
+    if (statTaken) statTaken.innerText = String(Math.max(0, Math.round(matchStats.damageTaken || 0)));
+    if (statAbilities) statAbilities.innerText = String(Math.max(0, Math.round(matchStats.abilitiesUsed || 0)));
+    if (statTurns) statTurns.innerText = String(Math.max(0, Math.round(matchStats.turnSwaps || 0)));
 
     // Data handling with defensive aliases
     try {
@@ -1671,6 +2261,83 @@ if (btnSoundSettings) {
     });
 }
 
+const btnPerfOverlay = document.getElementById('btn-perf-overlay');
+if (btnPerfOverlay) {
+    btnPerfOverlay.addEventListener('click', () => {
+        setPerfOverlayPref(!prefOn(PREF_KEYS.perfOverlay));
+        refreshPreferenceSettingsLabels();
+        sfx.playClick();
+    });
+}
+
+const btnA11yLarge = document.getElementById('btn-a11y-large-text');
+if (btnA11yLarge) {
+    btnA11yLarge.addEventListener('click', () => {
+        toggleStoredPref(PREF_KEYS.a11yLarge);
+        applyPreferenceClasses();
+        refreshPreferenceSettingsLabels();
+        sfx.playClick();
+    });
+}
+
+const btnA11yContrast = document.getElementById('btn-a11y-high-contrast');
+if (btnA11yContrast) {
+    btnA11yContrast.addEventListener('click', () => {
+        toggleStoredPref(PREF_KEYS.a11yContrast);
+        applyPreferenceClasses();
+        refreshPreferenceSettingsLabels();
+        sfx.playClick();
+    });
+}
+
+const btnA11yHp = document.getElementById('btn-a11y-hp-bars');
+if (btnA11yHp) {
+    btnA11yHp.addEventListener('click', () => {
+        toggleStoredPref(PREF_KEYS.a11yHpAlt);
+        applyPreferenceClasses();
+        refreshPreferenceSettingsLabels();
+        sfx.playClick();
+    });
+}
+
+const btnReduceMotion = document.getElementById('btn-reduce-motion');
+if (btnReduceMotion) {
+    btnReduceMotion.addEventListener('click', () => {
+        toggleStoredPref(PREF_KEYS.reduceMotion);
+        applyPreferenceClasses();
+        refreshPreferenceSettingsLabels();
+        sfx.playClick();
+    });
+}
+
+const btnMenuVfx = document.getElementById('btn-menu-vfx');
+if (btnMenuVfx) {
+    btnMenuVfx.addEventListener('click', () => {
+        toggleStoredPref(PREF_KEYS.menuVfxOff);
+        applyPreferenceClasses();
+        refreshPreferenceSettingsLabels();
+        sfx.playClick();
+    });
+}
+
+const btnCameraShake = document.getElementById('btn-camera-shake');
+if (btnCameraShake) {
+    btnCameraShake.addEventListener('click', () => {
+        cycleLevelPref(PREF_KEYS.cameraShake);
+        refreshPreferenceSettingsLabels();
+        sfx.playClick();
+    });
+}
+
+const btnHitStop = document.getElementById('btn-hit-stop');
+if (btnHitStop) {
+    btnHitStop.addEventListener('click', () => {
+        cycleLevelPref(PREF_KEYS.hitStop);
+        refreshPreferenceSettingsLabels();
+        sfx.playClick();
+    });
+}
+
 // ============================================================
 // EMOTE PRESETS MODAL
 // ============================================================
@@ -1744,7 +2411,9 @@ if (btnCloseEmotePresets) {
   'btn-close-changelog','btn-view-changelog','btn-return','btn-disconnect-ok',
   'btn-quick-match','btn-private-choice','btn-close-play-mode','btn-close-private',
   'btn-host-choice','btn-join-choice','btn-submit-join','btn-rematch','btn-splash-exit',
-  'btn-battle-pass', 'btn-emote-presets', 'btn-save-customization'].forEach(id => {
+  'btn-battle-pass', 'btn-emote-presets', 'btn-save-customization',
+  'btn-perf-overlay', 'btn-a11y-large-text', 'btn-a11y-high-contrast', 'btn-a11y-hp-bars', 'btn-reduce-motion',
+  'btn-menu-vfx', 'btn-camera-shake', 'btn-hit-stop'].forEach(id => {
      const el = document.getElementById(id);
      if (el) el.addEventListener('click', () => sfx.playClick(), true);
  });
