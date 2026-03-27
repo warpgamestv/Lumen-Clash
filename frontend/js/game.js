@@ -121,7 +121,8 @@ const PREF_KEYS = {
     reduceMotion: 'lumen_clash_reduce_motion',
     menuVfxOff: 'lumen_clash_menu_vfx_off',
     cameraShake: 'lumen_clash_camera_shake',
-    hitStop: 'lumen_clash_hit_stop'
+    hitStop: 'lumen_clash_hit_stop',
+    lastMenuCharacter: 'lumen_clash_last_char_id'
 };
 
 function prefOn(key) {
@@ -463,8 +464,38 @@ function saveEmotePresets(arr) {
 let activeEmotes = loadEmotePresets();
 let emoteCooldown = false;
 
+let lastReportedPresence = '';
+
+function computeDesiredPresence() {
+    if (typeof document !== 'undefined' && document.hidden) return 'away';
+    const mainHidden = document.getElementById('main-menu-container').classList.contains('hidden');
+    const matchmaking = !document.getElementById('matchmaking-overlay').classList.contains('hidden');
+    const inGame = !document.getElementById('ui-container').classList.contains('hidden');
+    const priv = !document.getElementById('private-match-container').classList.contains('hidden');
+    if (inGame || matchmaking) return 'match';
+    if (priv) return 'private_lobby';
+    if (!mainHidden) return 'menu';
+    return 'menu';
+}
+
+async function reportPresenceIfChanged(force = false) {
+    const state = computeDesiredPresence();
+    if (!force && state === lastReportedPresence) return;
+    lastReportedPresence = state;
+    try {
+        await fetch('/update-presence', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, state })
+        });
+    } catch (e) {}
+}
+
+document.addEventListener('visibilitychange', () => reportPresenceIfChanged(true));
+
 // Presence / Social Heartbeat (Reverted to 10s Separate Polls)
 function pollMenuData() {
+    reportPresenceIfChanged();
     // Only poll if on main menu
     const isMainMenu = !document.getElementById('main-menu-container').classList.contains('hidden');
     if (isMainMenu) {
@@ -486,6 +517,81 @@ console.log("Auto-update heartbeat active (10s separate)");
 
 // Fetch Profile Initialization
 let myUsername = 'Player';
+let lastSocialSnapshot = null;
+let menuActivityPopoverOpen = false;
+
+function syncMainMenuHeaderProfile(data) {
+    const nameEl = document.getElementById('menu-header-username');
+    const rankEl = document.getElementById('menu-header-rank');
+    const titleEl = document.getElementById('menu-header-title');
+    if (!nameEl || !rankEl || !titleEl) return;
+    const uname = (data && data.username) || myUsername || 'Pilot';
+    nameEl.textContent = uname;
+    const equippedTitle =
+        data && data.equippedTitle !== undefined
+            ? data.equippedTitle
+            : (playerProfileData && playerProfileData.equippedTitle) || '';
+    titleEl.textContent = equippedTitle && String(equippedTitle).trim() ? equippedTitle : '';
+    const rank = data && data.level != null ? data.level : playerProfileData && playerProfileData.level != null ? playerProfileData.level : 1;
+    rankEl.textContent = `Rank ${rank}`;
+}
+
+function refreshMenuActivityBadge(data) {
+    if (!data) return;
+    const n = (data.requests && data.requests.length) + (data.duelInvites && data.duelInvites.length);
+    const badge = document.getElementById('menu-activity-badge');
+    if (!badge) return;
+    if (n > 0) {
+        badge.textContent = n > 9 ? '9+' : String(n);
+        badge.classList.remove('hidden');
+    } else {
+        badge.classList.add('hidden');
+    }
+}
+
+function renderMenuActivityPopoverBody() {
+    const body = document.getElementById('menu-activity-popover-body');
+    if (!body) return;
+    const data = lastSocialSnapshot;
+    if (!data) {
+        body.innerHTML = '<p class="menu-activity-empty">Loading activity…</p>';
+        return;
+    }
+    const reqs = data.requests || [];
+    const duels = data.duelInvites || [];
+    if (reqs.length === 0 && duels.length === 0) {
+        body.innerHTML = '<p class="menu-activity-empty">No friend requests or duel invites right now.</p>';
+        return;
+    }
+    let html = '';
+    const bits = [];
+    if (reqs.length > 0) {
+        bits.push(`${reqs.length} friend request${reqs.length > 1 ? 's' : ''}`);
+    }
+    if (duels.length > 0) {
+        bits.push(`${duels.length} duel invite${duels.length > 1 ? 's' : ''}`);
+    }
+    body.innerHTML = `<button type="button" class="menu-activity-item">${bits.join(' · ')} — Open Social</button>`;
+}
+
+function closeMenuActivityPopover() {
+    menuActivityPopoverOpen = false;
+    const pop = document.getElementById('menu-activity-popover');
+    if (pop) pop.classList.add('hidden');
+    const b = document.getElementById('btn-menu-activity');
+    if (b) b.setAttribute('aria-expanded', 'false');
+}
+
+function openMenuActivityPopover() {
+    menuActivityPopoverOpen = true;
+    const pop = document.getElementById('menu-activity-popover');
+    if (pop) pop.classList.remove('hidden');
+    const b = document.getElementById('btn-menu-activity');
+    if (b) b.setAttribute('aria-expanded', 'true');
+    renderMenuActivityPopoverBody();
+    fetchFriends(true);
+}
+
 async function fetchPlayerProfile(silent = false) {
     try {
         const res = await fetch(`/profile?uid=${localUid}`);
@@ -494,19 +600,19 @@ async function fetchPlayerProfile(silent = false) {
         myUsername = data.username || 'Player';
         
         document.getElementById('profile-username').innerText = myUsername;
-        document.getElementById('profile-level').innerText = data.level; // Account Level
+        document.getElementById('profile-level').innerText = data.level; // Account rank (from class levels)
         document.getElementById('profile-wins').innerText = data.wins;
         document.getElementById('profile-losses').innerText = data.losses;
 
-        // Account XP/Level
-        const neededXP = data.level * 100;
-        const xpPct = (data.xp / (neededXP || 100)) * 100;
-        document.getElementById('profile-xp-fill').style.width = `${Math.min(100, xpPct)}%`;
-        document.getElementById('profile-xp-text').innerText = `${data.xp}/${neededXP}`;
+        const roster = sumRosterXpProgress(data.classes);
+        document.getElementById('profile-xp-fill').style.width = `${roster.pct}%`;
+        document.getElementById('profile-xp-text').innerText = `${roster.sumXp} / ${roster.sumNeed}`;
 
         // Update BP badge on main menu if exists
         const bpBadge = document.getElementById('bp-account-level-button');
         if (bpBadge) bpBadge.innerText = `Rank ${data.level}`;
+
+        syncMainMenuHeaderProfile(data);
 
         // Render match history
         updateMatchHistoryUI(data.matchHistory);
@@ -541,10 +647,11 @@ function updateProfileUI(data) {
     document.getElementById('profile-wins').innerText = data.wins;
     document.getElementById('profile-losses').innerText = data.losses;
 
-    const neededXP = data.level * 100;
-    const xpPct = (data.xp / (neededXP || 100)) * 100;
-    document.getElementById('profile-xp-fill').style.width = `${Math.min(100, xpPct)}%`;
-    document.getElementById('profile-xp-text').innerText = `${data.xp}/${neededXP}`;
+    const roster = sumRosterXpProgress(data.classes);
+    document.getElementById('profile-xp-fill').style.width = `${roster.pct}%`;
+    document.getElementById('profile-xp-text').innerText = `${roster.sumXp} / ${roster.sumNeed}`;
+
+    syncMainMenuHeaderProfile(data);
 
     // Render match history if profile modal is open
     const isProfileOpen = !document.getElementById('profile-container').classList.contains('hidden');
@@ -561,7 +668,6 @@ function updateProfileUI(data) {
         }).join('');
     }
 }
-fetchPlayerProfile();
 
 // Character Definitions
 const CHARACTER_CLASSES = [
@@ -571,6 +677,9 @@ const CHARACTER_CLASSES = [
 ];
 let selectedCharacterIndex = 0;
 let playerProfileData = null; // Full data from backend
+fetchPlayerProfile();
+syncMainMenuHeaderProfile({ username: myUsername, level: 1 });
+
 let currentPreviewCharId = 'aegisKnight';
 let currentSkinIndex = 0;
 
@@ -582,6 +691,35 @@ const BP_REWARDS = {
     15: { type: 'title', id: 'grandmaster', name: 'Grandmaster' },
     20: { type: 'skin', id: 'legend', name: 'Lumen Legend' }
 };
+
+/** Sum of (class xp) / sum of (level×100) — matches how ranks grow from class levels, not lifetime stats.xp */
+function sumRosterXpProgress(classes) {
+    let sumXp = 0;
+    let sumNeed = 0;
+    for (const c of Object.values(classes || {})) {
+        const L = Math.max(1, Number(c.level) || 1);
+        const need = L * 100;
+        sumXp += Math.max(0, Number(c.xp) || 0);
+        sumNeed += need;
+    }
+    if (sumNeed <= 0) return { sumXp: 0, sumNeed: 0, pct: 0 };
+    return { sumXp, sumNeed, pct: Math.min(100, (sumXp / sumNeed) * 100) };
+}
+
+function classLevelProgress(classState) {
+    const L = Math.max(1, Number(classState && classState.level) || 1);
+    const need = L * 100;
+    const xp = Math.max(0, Number(classState && classState.xp) || 0);
+    return { need, xp, pct: need > 0 ? Math.min(100, (xp / need) * 100) : 0 };
+}
+
+function rosterPctAfterSubtractingClassXp(pg, classId, delta) {
+    if (!pg || !pg.classes || !classId) return sumRosterXpProgress(pg && pg.classes).pct;
+    const copy = JSON.parse(JSON.stringify(pg.classes));
+    if (!copy[classId]) return sumRosterXpProgress(copy).pct;
+    copy[classId].xp = Math.max(0, (Number(copy[classId].xp) || 0) - (Number(delta) || 0));
+    return sumRosterXpProgress(copy).pct;
+}
 
 /** RGB max channel at or below this → alpha 0 (removes flat black / dark matte backdrops on PNGs). */
 const CHAR_BITMAP_NEAR_BLACK_THRESHOLD = 28;
@@ -872,6 +1010,7 @@ function connectWebSocket(specificRoomId = null) {
     if (specificRoomId) lastRoomId = specificRoomId;
     // Append chosen character class
     const charId = CHARACTER_CLASSES[selectedCharacterIndex].id;
+    persistLastSelectedCharacterId(charId);
     // Connect to Node.js proxy to bypass Firewall issues on Windows
     let wsUrl = `ws://${window.location.hostname}:8083/play?char=${charId}&uid=${localUid}`;
     if (specificRoomId) {
@@ -884,6 +1023,7 @@ function connectWebSocket(specificRoomId = null) {
         reconnectAttempts = 0;
         clearReconnectTimer();
         document.getElementById('status-message').innerText = "Connected. Waiting for opponent...";
+        reportPresenceIfChanged(true);
     };
 
     socket.onmessage = (event) => {
@@ -906,7 +1046,24 @@ function connectWebSocket(specificRoomId = null) {
         if (msg.type === 'REMATCH_VOTE') {
             if (msg.pId !== myPlayerId) {
                 const status = document.getElementById('rematch-status');
-                if (status) status.innerText = 'OPPONENT WANTS A REMATCH!';
+                if (status) {
+                    const map = { bo3: 'Best of 3', continue: 'Next round', single: 'One more game' };
+                    const label = map[msg.choice] || 'One more game';
+                    status.innerText = `Opponent chose: ${label}`;
+                }
+            }
+        }
+        if (msg.type === 'REMATCH_MODE_MISMATCH') {
+            const status = document.getElementById('rematch-status');
+            if (status) status.innerText = 'Choose the same option (or both Best of 3).';
+            const btn = document.getElementById('btn-rematch');
+            const bo3 = document.getElementById('btn-rematch-bo3');
+            if (btn) btn.disabled = false;
+            if (bo3) bo3.disabled = false;
+            const label = document.getElementById('btn-rematch-label');
+            if (label) {
+                const ser = gameState && gameState.series;
+                label.textContent = ser && !ser.complete ? 'Next round' : 'Challenge Again';
             }
         }
     };
@@ -1185,6 +1342,7 @@ document.getElementById('btn-close-char-menu').addEventListener('click', () => {
 });
 
 document.getElementById('btn-play-game').addEventListener('click', () => {
+    closeMenuActivityPopover();
     initGame();
     document.getElementById('play-mode-modal').classList.remove('hidden');
 });
@@ -1197,12 +1355,14 @@ document.getElementById('btn-quick-match').addEventListener('click', () => {
     document.getElementById('play-mode-modal').classList.add('hidden');
     document.getElementById('matchmaking-overlay').classList.remove('hidden');
     document.getElementById('matchmaking-text').innerText = "Connecting to Server...";
+    reportPresenceIfChanged(true);
     connectWebSocket();
 });
 
 document.getElementById('btn-private-choice').addEventListener('click', () => {
     document.getElementById('play-mode-modal').classList.add('hidden');
     document.getElementById('private-match-container').classList.remove('hidden');
+    reportPresenceIfChanged(true);
 });
 
 document.querySelectorAll('.char-card').forEach(card => {
@@ -1215,6 +1375,7 @@ document.querySelectorAll('.char-card').forEach(card => {
         card.classList.add('selected-card');
         
         sfx.playClick();
+        persistLastSelectedCharacterId(charId);
         updateMenuCharacterDisplay();
     });
 });
@@ -1253,6 +1414,33 @@ function updateMenuCharacterDisplay() {
     }
 }
 
+function persistLastSelectedCharacterId(charId) {
+    if (!CHARACTER_CLASSES.some(c => c.id === charId)) return;
+    localStorage.setItem(PREF_KEYS.lastMenuCharacter, charId);
+}
+
+function hydrateSelectedCharacterFromStorage() {
+    const raw = localStorage.getItem(PREF_KEYS.lastMenuCharacter);
+    if (!raw) return;
+    const idx = CHARACTER_CLASSES.findIndex(c => c.id === raw);
+    if (idx >= 0) {
+        selectedCharacterIndex = idx;
+        currentPreviewCharId = CHARACTER_CLASSES[idx].id;
+    }
+}
+
+function syncRosterCardSelectionClasses() {
+    const id = CHARACTER_CLASSES[selectedCharacterIndex]?.id;
+    if (!id) return;
+    document.querySelectorAll('.char-card').forEach(c => {
+        c.classList.toggle('selected-card', c.getAttribute('data-char') === id);
+    });
+}
+
+hydrateSelectedCharacterFromStorage();
+syncRosterCardSelectionClasses();
+updateMenuCharacterDisplay();
+
 // Update character card levels/xp from profile
 function updateRosterStats() {
     if (!playerProfileData) return;
@@ -1264,7 +1452,7 @@ function updateRosterStats() {
         if (badge) badge.innerText = `Lv. ${pClass.level}`;
         
         const fill = card.querySelector('.char-card-xp-bar .fill');
-        if (fill) fill.style.width = `${Math.min(100, pClass.xp)}%`;
+        if (fill) fill.style.width = `${classLevelProgress(pClass).pct}%`;
     });
 }
 // Hook into profile fetch
@@ -1307,6 +1495,10 @@ document.getElementById('btn-save-username').addEventListener('click', async () 
             document.getElementById('profile-username').innerText = data.username;
             document.getElementById('username-editor').classList.add('hidden');
             document.getElementById('username-display').classList.remove('hidden');
+            syncMainMenuHeaderProfile({
+                username: data.username,
+                level: playerProfileData && playerProfileData.level != null ? playerProfileData.level : 1
+            });
         } else {
             errorEl.innerText = data.error || 'Failed to save';
             errorEl.classList.remove('hidden');
@@ -1327,6 +1519,18 @@ document.getElementById('btn-close-social').addEventListener('click', () => {
     document.getElementById('social-container').classList.add('hidden');
 });
 
+async function parseJsonResponse(res) {
+    const text = await res.text();
+    try {
+        return JSON.parse(text);
+    } catch (e) {
+        const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 200);
+        throw new Error(
+            snippet ? `Server returned non-JSON (HTTP ${res.status}): ${snippet}` : `Bad response (HTTP ${res.status})`
+        );
+    }
+}
+
 async function fetchFriends(silent = false) {
     if (!silent) document.getElementById('friends-list').innerHTML = '<div style="padding: 20px; text-align: center; color: #888;">Updating social...</div>';
     try {
@@ -1338,15 +1542,32 @@ async function fetchFriends(silent = false) {
 
 function updateSocialUI(data) {
     if (!data) return;
+    lastSocialSnapshot = data;
     const friends = data.friends || [];
     const requests = data.requests || [];
+    const duelInvites = data.duelInvites || [];
     
     document.getElementById('friends-count').innerText = `${friends.length}/100`;
 
-    // Update notification dot
+    // Update notification dot (friend requests + duel invites)
     const dot = document.getElementById('social-dot');
-    if (requests.length > 0) dot.classList.remove('hidden');
+    if (requests.length > 0 || duelInvites.length > 0) dot.classList.remove('hidden');
     else dot.classList.add('hidden');
+
+    refreshMenuActivityBadge(data);
+
+    const duelToast = document.getElementById('menu-duel-invite-toast');
+    if (duelToast) {
+        if (duelInvites.length > 0) {
+            duelToast.classList.remove('hidden');
+            const t = duelToast.querySelector('.menu-duel-invite-toast-text');
+            if (t) t.textContent = duelInvites.length === 1 ? 'You have a duel invite from a friend.' : `You have ${duelInvites.length} duel invites.`;
+        } else {
+            duelToast.classList.add('hidden');
+        }
+    }
+
+    if (menuActivityPopoverOpen) renderMenuActivityPopoverBody();
 
     // Only update the list if the container is open
     const isSocialOpen = !document.getElementById('social-container').classList.contains('hidden');
@@ -1354,6 +1575,25 @@ function updateSocialUI(data) {
 
     const list = document.getElementById('friends-list');
     let html = '';
+
+    if (duelInvites.length > 0) {
+        html += `<div style="background: rgba(255, 200, 120, 0.08); padding: 10px; font-weight: bold; font-size: 0.9rem; color: #ffcc80; margin-bottom: 5px;">Duel invites (${duelInvites.length})</div>`;
+        duelInvites.forEach((d) => {
+            html += `
+                <div style="padding: 10px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: space-between; background: rgba(255, 180, 80, 0.06);">
+                    <div>
+                        <div style="font-weight: bold; color: #eee;">${d.fromUsername}</div>
+                        <div style="font-size: 0.75rem; color: #888;">Private match · code ${d.code}</div>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button onclick="acceptDuelInvite('${d.fromUid}')" style="background: #00ffcc; border: none; color: #000; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer; font-weight: bold;">Accept</button>
+                        <button onclick="declineDuelInvite('${d.fromUid}')" style="background: #444; border: none; color: #fff; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer;">Decline</button>
+                    </div>
+                </div>
+            `;
+        });
+        html += '<div style="height: 15px;"></div>';
+    }
 
     // Pending Requests Section
     if (requests.length > 0) {
@@ -1376,7 +1616,7 @@ function updateSocialUI(data) {
     }
 
     // Friends Section
-    if (friends.length === 0 && requests.length === 0) {
+    if (friends.length === 0 && requests.length === 0 && duelInvites.length === 0) {
         list.innerHTML = '<div style="padding: 20px; text-align: center; color: #888;">No friends yet. Add some to play together!</div>';
         return;
     }
@@ -1385,16 +1625,18 @@ function updateSocialUI(data) {
         html += `<div style="padding: 5px 10px; font-weight: bold; font-size: 0.9rem; opacity: 0.7;">My Friends</div>`;
         friends.forEach(f => {
             const statusColor = f.status === 'Online' ? '#00ffcc' : '#666';
+            const presenceLine = f.presenceLabel || (f.status === 'Online' ? 'Online' : 'Offline');
             html += `
-                <div style="padding: 12px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: space-between;">
-                    <div style="display: flex; align-items: center; gap: 10px;">
-                        <div style="width: 10px; height: 10px; border-radius: 50%; background: ${statusColor}; box-shadow: 0 0 5px ${statusColor};"></div>
-                        <div>
+                <div style="padding: 12px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                    <div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
+                        <div style="width: 10px; height: 10px; flex-shrink: 0; border-radius: 50%; background: ${statusColor}; box-shadow: 0 0 5px ${statusColor};"></div>
+                        <div style="min-width: 0;">
                             <div style="font-weight: bold; color: #eee;">${f.username}</div>
-                            <div style="font-size: 0.75rem; color: #888;">Level ${f.level}</div>
+                            <div style="font-size: 0.72rem; color: #6a7a9a;">${presenceLine}</div>
                         </div>
                     </div>
-                    <div style="display: flex; gap: 8px;">
+                    <div style="display: flex; flex-shrink: 0; flex-wrap: wrap; gap: 6px; justify-content: flex-end;">
+                        <button type="button" onclick="challengeFriend('${f.uid}')" style="background: rgba(0, 210, 255, 0.2); border: 1px solid rgba(0, 210, 255, 0.45); color: #9ef0ff; border-radius: 4px; padding: 4px 10px; font-size: 0.75rem; cursor: pointer; font-weight: bold;">Challenge</button>
                         <button onclick="removeFriend('${f.uid}')" style="background: none; border: none; color: #ff0055; opacity: 0.5; cursor: pointer; font-size: 0.8rem; padding: 5px;">Remove</button>
                     </div>
                 </div>
@@ -1405,6 +1647,65 @@ function updateSocialUI(data) {
     }
     list.innerHTML = html;
 }
+
+window.challengeFriend = async (targetUid) => {
+    try {
+        const res = await fetch('/friend-duel-invite', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, targetUid })
+        });
+        const data = await parseJsonResponse(res);
+        if (data.ok && data.roomId) {
+            document.getElementById('social-container').classList.add('hidden');
+            document.getElementById('matchmaking-overlay').classList.remove('hidden');
+            document.getElementById('matchmaking-text').innerText = 'Waiting for friend to join...';
+            reportPresenceIfChanged(true);
+            connectWebSocket(data.roomId);
+            fetchFriends(true);
+        } else {
+            alert(data.error || 'Could not send challenge');
+        }
+    } catch (e) {
+        alert(e.message || 'Connection error');
+    }
+};
+
+window.acceptDuelInvite = async (fromUid) => {
+    try {
+        const res = await fetch('/friend-duel-accept', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, fromUid })
+        });
+        const data = await parseJsonResponse(res);
+        if (data.ok && data.roomId) {
+            document.getElementById('social-container').classList.add('hidden');
+            document.getElementById('matchmaking-overlay').classList.remove('hidden');
+            document.getElementById('matchmaking-text').innerText = 'Joining private match...';
+            reportPresenceIfChanged(true);
+            connectWebSocket(data.roomId);
+            fetchFriends(true);
+        } else {
+            alert(data.error || 'Invite is no longer valid');
+            fetchFriends();
+        }
+    } catch (e) {
+        alert(e.message || 'Could not accept invite');
+        fetchFriends();
+    }
+};
+
+window.declineDuelInvite = async (fromUid) => {
+    try {
+        await fetch('/friend-duel-decline', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, fromUid })
+        });
+        fetchFriends();
+    } catch (e) {}
+};
 
 window.acceptFriend = async (friendUid) => {
     try {
@@ -1484,6 +1785,7 @@ document.getElementById('btn-close-private').addEventListener('click', () => {
         // Close entire modal and go back to play mode selection
         document.getElementById('private-match-container').classList.add('hidden');
         document.getElementById('play-mode-modal').classList.remove('hidden');
+        reportPresenceIfChanged(true);
     }
 });
 
@@ -1503,6 +1805,7 @@ document.getElementById('btn-host-choice').addEventListener('click', async () =>
             document.getElementById('private-host-view').classList.remove('hidden');
             
             // Host joins the room automatically
+            reportPresenceIfChanged(true);
             connectWebSocket(data.roomId);
         }
     } catch (e) {
@@ -1534,7 +1837,7 @@ document.getElementById('btn-submit-join').addEventListener('click', async () =>
             document.getElementById('private-match-container').classList.add('hidden');
             document.getElementById('matchmaking-overlay').classList.remove('hidden');
             document.getElementById('matchmaking-text').innerText = "Joining Battle...";
-            
+            reportPresenceIfChanged(true);
             // Join matched room
             connectWebSocket(data.roomId);
         } else {
@@ -1589,6 +1892,7 @@ document.getElementById('btn-return').addEventListener('click', () => {
     document.getElementById('ui-container').classList.add('hidden');
     document.getElementById('main-menu-container').classList.remove('hidden');
     document.getElementById('matchmaking-overlay').classList.add('hidden');
+    reportPresenceIfChanged(true);
     
     // Refresh stats
     fetchPlayerProfile();
@@ -1893,11 +2197,12 @@ function openBattlePass() {
     
     track.innerHTML = '';
     // Generate nodes for levels 1-20
+    const accLevel = Math.max(1, Number(playerProfileData.level) || 1);
     for (let i = 1; i <= 20; i++) {
         const node = document.createElement('div');
         node.className = 'bp-node';
-        if (i <= playerProfileData.level) node.classList.add('unlocked');
-        if (i === playerProfileData.level) node.classList.add('current');
+        if (i <= accLevel) node.classList.add('unlocked');
+        if (i === Math.min(20, accLevel)) node.classList.add('current');
         
         const reward = BP_REWARDS[i];
         let icon = '🔒';
@@ -2012,6 +2317,11 @@ async function saveCustomization() {
         });
         if (res.ok) {
             closeModal('character-preview-modal');
+            const idx = CHARACTER_CLASSES.findIndex(c => c.id === currentPreviewCharId);
+            if (idx >= 0) selectedCharacterIndex = idx;
+            persistLastSelectedCharacterId(currentPreviewCharId);
+            syncRosterCardSelectionClasses();
+            updateMenuCharacterDisplay();
             fetchPlayerProfile(); // Refresh
         }
     } catch(e) { console.error("Save failed", e); }
@@ -2035,6 +2345,8 @@ window.handleSplashExit = function() {
     document.getElementById('ui-container').classList.add('hidden');
     document.getElementById('matchmaking-overlay').classList.add('hidden');
     document.getElementById('main-menu-container').classList.remove('hidden');
+    closeMenuActivityPopover();
+    reportPresenceIfChanged(true);
 
     if (!game) initGame();
     const layoutWhenReady = () => {
@@ -2056,11 +2368,15 @@ window.handleSplashRematch = function() {
     reconnectAttempts = 0;
     console.log("[Splash] Rematch clicked");
     if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ action: 'rematch' }));
+        const ser = gameState && gameState.series;
+        const seriesKind = ser && !ser.complete ? 'continue' : 'single';
+        socket.send(JSON.stringify({ action: 'rematch', series: seriesKind }));
         const btn = document.getElementById('btn-rematch');
+        const bo3 = document.getElementById('btn-rematch-bo3');
         const label = document.getElementById('btn-rematch-label');
         if (label) label.textContent = 'Waiting for Opponent...';
         if (btn) btn.disabled = true;
+        if (bo3) bo3.disabled = true;
         if (typeof sfx.playClick === 'function') sfx.playClick();
         initGame();
         return;
@@ -2069,6 +2385,24 @@ window.handleSplashRematch = function() {
     const st = document.getElementById('rematch-status');
     if (st) st.textContent = 'Connection lost — use Play from the menu.';
     window.handleSplashExit();
+};
+
+window.handleSplashRematchBo3 = function() {
+    clearReconnectTimer();
+    reconnectAttempts = 0;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ action: 'rematch', series: 'bo3' }));
+        const btn = document.getElementById('btn-rematch');
+        const bo3 = document.getElementById('btn-rematch-bo3');
+        const label = document.getElementById('btn-rematch-label');
+        if (label) label.textContent = 'Waiting for Opponent...';
+        if (btn) btn.disabled = true;
+        if (bo3) bo3.disabled = true;
+        if (typeof sfx.playClick === 'function') sfx.playClick();
+        initGame();
+        return;
+    }
+    window.handleSplashRematch();
 };
 
 async function showXPSplash(won, pg) {
@@ -2109,8 +2443,16 @@ async function showXPSplash(won, pg) {
     splash.style.zIndex = "99999"; 
     splash.style.pointerEvents = "auto";
     splash.style.display = "flex"; // Ensure visible
-    title.innerText = won ? 'VICTORY' : 'DEFEAT';
-    title.style.color = won ? '#00d2ff' : '#ff0055';
+    const ser = typeof gameState !== 'undefined' && gameState && gameState.series;
+    if (ser && ser.complete) {
+        const myW = myPlayerId === 'p1' ? ser.p1Wins : ser.p2Wins;
+        const iWonSeries = myW >= ser.needed;
+        title.innerText = iWonSeries ? 'SERIES WON' : 'SERIES LOST';
+        title.style.color = iWonSeries ? '#00d2ff' : '#ff0055';
+    } else {
+        title.innerText = won ? 'VICTORY' : 'DEFEAT';
+        title.style.color = won ? '#00d2ff' : '#ff0055';
+    }
     xpFill.style.transition = 'none';
     xpFill.style.width = '0%';
     bpFill.style.transition = 'none';
@@ -2120,9 +2462,36 @@ async function showXPSplash(won, pg) {
 
     // Enable buttons
     const btnRematch = document.getElementById('btn-rematch');
+    const btnBo3 = document.getElementById('btn-rematch-bo3');
     const btnExit = document.getElementById('btn-splash-exit');
     const rematchLbl = document.getElementById('btn-rematch-label');
-    if (rematchLbl) rematchLbl.textContent = 'Challenge Again';
+    const seriesLine = document.getElementById('splash-series-line');
+    const serState = typeof gameState !== 'undefined' && gameState && gameState.series;
+    if (rematchLbl) rematchLbl.textContent = serState && !serState.complete ? 'Next round' : 'Challenge Again';
+    if (seriesLine) {
+        if (serState) {
+            seriesLine.classList.remove('hidden');
+            const myW = myPlayerId === 'p1' ? serState.p1Wins : serState.p2Wins;
+            const opW = myPlayerId === 'p1' ? serState.p2Wins : serState.p1Wins;
+            seriesLine.classList.toggle('series-complete', !!serState.complete);
+            if (serState.complete) {
+                seriesLine.innerText = `Series final — You ${myW} · Opponent ${opW} · First to ${serState.needed}`;
+            } else {
+                seriesLine.innerText = `Series — You ${myW} · Opponent ${opW} · First to ${serState.needed}`;
+            }
+        } else {
+            seriesLine.classList.add('hidden');
+            seriesLine.innerText = '';
+            seriesLine.classList.remove('series-complete');
+        }
+    }
+    if (btnBo3) {
+        const hideBo3 = !!(serState && !serState.complete);
+        btnBo3.classList.toggle('hidden', hideBo3);
+        btnBo3.disabled = false;
+        btnBo3.style.pointerEvents = 'auto';
+        btnBo3.style.cursor = 'pointer';
+    }
     if (btnRematch) {
         btnRematch.disabled = false;
         btnRematch.style.pointerEvents = "auto";
@@ -2154,21 +2523,28 @@ async function showXPSplash(won, pg) {
         const charLevel = charData.level || 1;
         const charXp = (charData.xp !== undefined) ? charData.xp : 0;
         const xpGained = pg.xpGained || (won ? 50 : 10);
-        
+        const charNeed = Math.max(100, charLevel * 100);
+        const endCharPct = classLevelProgress(charData).pct;
+        const preClassXp = Math.max(0, charXp - xpGained);
+        const startCharPct = charNeed > 0 ? Math.min(100, Math.max(0, (preClassXp / charNeed) * 100)) : 0;
+        const charName = CHARACTER_CLASSES.find((x) => x.id === classId)?.name || 'Class';
+
         console.log("Calculated: Level", charLevel, "XP", charXp, "Gained", xpGained);
 
         xpGainedEl.innerText = xpGained;
         levelEl.innerText = pg.leveledUp ? Math.max(1, charLevel - 1) : charLevel;
-        
-        // Account Level (BP)
-        bpRankEl.innerText = pg.level || 1; 
-        bpXpGained.innerText = `+${xpGained} Account XP`;
+
+        bpRankEl.innerText = pg.level || 1;
+        bpXpGained.innerText = `+${xpGained} XP (${charName})`;
+
+        const rosterEnd = sumRosterXpProgress(pg.classes);
+        const rosterStartPct = rosterPctAfterSubtractingClassXp(pg, classId, xpGained);
 
         console.groupEnd();
         // Wait for pop-in animation
         await new Promise(r => setTimeout(r, 600));
 
-        // Animation: Character Level
+        // Animation: Character Level (bar = % toward this class's next level)
         if (pg.leveledUp) {
             xpFill.style.transition = 'width 0.8s ease-in';
             xpFill.style.width = '100%';
@@ -2180,20 +2556,20 @@ async function showXPSplash(won, pg) {
             xpFill.style.width = '0%';
             await new Promise(r => setTimeout(r, 50));
             xpFill.style.transition = 'width 1.2s cubic-bezier(0.1, 0.5, 0.2, 1)';
-            xpFill.style.width = `${charXp}%`;
+            xpFill.style.width = `${endCharPct}%`;
         } else {
-            const startPct = Math.max(0, charXp - xpGained);
-            xpFill.style.width = `${startPct}%`;
+            xpFill.style.width = `${startCharPct}%`;
             await new Promise(r => setTimeout(r, 50));
             xpFill.style.transition = 'width 1.5s cubic-bezier(0.1, 0.5, 0.2, 1)';
-            xpFill.style.width = `${charXp}%`;
+            xpFill.style.width = `${endCharPct}%`;
         }
-        xpDetails.innerText = `${charXp} / 100 XP`;
+        xpDetails.innerText = `${charXp} / ${charNeed} XP (${charName})`;
 
-        // BP Animation
+        bpFill.style.width = `${rosterStartPct}%`;
+        await new Promise(r => setTimeout(r, 50));
         bpFill.style.transition = 'width 1.5s cubic-bezier(0.1, 0.5, 0.2, 1)';
-        bpFill.style.width = `${charXp}%`;
-        bpDetails.innerText = `Progress tracked to Rank ${(pg.level || 1) + 1}`;
+        bpFill.style.width = `${rosterEnd.pct}%`;
+        bpDetails.innerText = `Roster ${rosterEnd.sumXp} / ${rosterEnd.sumNeed} XP · Rank ${pg.level || 1}`;
     } catch (e) {
         console.error("[Splash] Critical Logic Error", e);
         console.groupEnd();
@@ -2212,7 +2588,50 @@ function bindSplashButton(el, handler) {
     });
 }
 bindSplashButton(btnRematchEl, () => window.handleSplashRematch());
+const btnRematchBo3El = document.getElementById('btn-rematch-bo3');
+bindSplashButton(btnRematchBo3El, () => window.handleSplashRematchBo3());
 bindSplashButton(btnExitEl, () => window.handleSplashExit());
+
+const btnDuelToastSocial = document.getElementById('btn-duel-toast-social');
+if (btnDuelToastSocial) {
+    btnDuelToastSocial.addEventListener('click', () => {
+        document.getElementById('social-container').classList.remove('hidden');
+        fetchFriends();
+    });
+}
+
+(function initMenuActivityHub() {
+    const popBody = document.getElementById('menu-activity-popover-body');
+    if (popBody) {
+        popBody.addEventListener('click', (e) => {
+            const t = e.target.closest('.menu-activity-item');
+            if (!t) return;
+            closeMenuActivityPopover();
+            document.getElementById('social-container').classList.remove('hidden');
+            fetchFriends();
+            if (typeof sfx !== 'undefined' && typeof sfx.playClick === 'function') sfx.playClick();
+        });
+    }
+    const btn = document.getElementById('btn-menu-activity');
+    const closeBtn = document.getElementById('btn-menu-activity-close');
+    if (btn) {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (menuActivityPopoverOpen) closeMenuActivityPopover();
+            else openMenuActivityPopover();
+        });
+    }
+    if (closeBtn) closeBtn.addEventListener('click', () => closeMenuActivityPopover());
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && menuActivityPopoverOpen) closeMenuActivityPopover();
+    });
+    document.addEventListener('click', (e) => {
+        if (!menuActivityPopoverOpen) return;
+        const t = e.target;
+        if (t.closest('#menu-activity-popover') || t.closest('#btn-menu-activity')) return;
+        closeMenuActivityPopover();
+    });
+})();
 
 // ============================================================
 // IN-GAME EMOTE BAR
@@ -2410,7 +2829,9 @@ if (btnCloseEmotePresets) {
   'btn-close-char-menu','btn-close-profile','btn-close-settings','btn-close-leaderboard',
   'btn-close-changelog','btn-view-changelog','btn-return','btn-disconnect-ok',
   'btn-quick-match','btn-private-choice','btn-close-play-mode','btn-close-private',
-  'btn-host-choice','btn-join-choice','btn-submit-join','btn-rematch','btn-splash-exit',
+  'btn-host-choice','btn-join-choice','btn-submit-join','btn-rematch','btn-rematch-bo3','btn-splash-exit',
+  'btn-duel-toast-social',
+  'btn-menu-activity', 'btn-menu-activity-close',
   'btn-battle-pass', 'btn-emote-presets', 'btn-save-customization',
   'btn-perf-overlay', 'btn-a11y-large-text', 'btn-a11y-high-contrast', 'btn-a11y-hp-bars', 'btn-reduce-motion',
   'btn-menu-vfx', 'btn-camera-shake', 'btn-hit-stop'].forEach(id => {

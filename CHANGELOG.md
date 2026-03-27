@@ -1,4 +1,23 @@
-# Lumen Clash
+y# Lumen Clash
+
+## v1.3.0 — Menu readability & social polish (2026-03-22)
+### Added
+- **Friend challenges**: **Challenge** on a friend creates a private match and sends a **duel invite** they can accept or decline under Social; challenger waits in the matchmaking overlay.
+- **Friend presence**: Friends can show richer status (**In menu**, **In match**, **Private lobby**, **Away**, **Offline**) using a lightweight presence heartbeat to the server.
+- **Last chosen character**: The roster class you last picked (or saved customization for) is stored in `localStorage` and drives the **main menu hero** and default queue class after reload.
+- **Best of 3 (post-match)**: XP splash adds **Best of 3** beside **Challenge Again**; when both players pick it, subsequent games count toward **first to 2** with a live series line on the splash. Between rounds, only **Next round** is shown until the set is decided.
+- **Rematch feedback**: Opponent choice is surfaced (**One more game**, **Best of 3**, **Next round**); if choices conflict, a short message asks you to match.
+- **Duel invite toast**: Pending duel invites show a main-menu **banner** with **Open Social** so invites are harder to miss.
+- **Main menu header (top right)**: **Pilot** strip shows **username** and **account rank**; **Activity** (bell) opens a small inbox for **friend requests** and **duel invites** (with a footnote that quests, seasonal rewards, and events can land here later).
+
+### Changed
+- **Main menu left rail**: Larger typography for **nav labels**, **hints**, the **Luminary Pass** row, and rank badge so sidebar actions are easier to read (including stacked mobile layouts).
+- **Accessibility “Larger UI text”**: Sidebar sizes scale up a bit further when that setting is enabled.
+
+### Fixed
+- **Local dev API proxy**: Node static server now matches API paths reliably (normalized URL path, proxy-before-files) so POST routes like **`/friend-duel-invite`** reach wrangler instead of returning a filesystem 404; clearer JSON errors when the backend is unreachable.
+- **Private room cleanup**: `GameRoom` WebSocket teardown now uses **`this.env`** for the matchmaker client (was a stray `env` reference).
+- **XP / rank display**: Account **rank** is derived from class levels, but the UI was pairing it with **lifetime `stats.xp`** and a `rank × 100` curve (wrong). Profile and splash bars now use **sum of class XP / sum of (level×100)** (“roster XP”). Roster class cards use **xp / (level×100)** for their fill. **`/profile`** recomputes rank from stored class levels to fix drift. Default **`add-xp`** class id is **`aegisKnight`** (not `knight`) so XP isn’t stored under a dead key.
 
 ## v1.2.0 — Responsive Polish & Character Rendering (2026-03-22)
 ### Added

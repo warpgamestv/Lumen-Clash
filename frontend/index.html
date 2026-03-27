@@ -55,12 +55,12 @@
             <div id="bp-splash-module" class="xp-module xp-splash-bp card-glass">
                 <div class="xp-splash-row">
                     <span class="xp-splash-bp-label">LUMINARY PASS RANK <span id="bp-splash-rank">1</span></span>
-                    <span id="bp-splash-xp-gained" class="xp-splash-bp-xp">+0 Account XP</span>
+                    <span id="bp-splash-xp-gained" class="xp-splash-bp-xp">+0 XP</span>
                 </div>
                 <div class="xp-bar-bg xp-splash-bar-bg xp-splash-bar-bg--bp">
                     <div id="bp-splash-fill" class="xp-bar-fill xp-splash-bp-fill"></div>
                 </div>
-                <div id="bp-splash-details" class="xp-splash-xp-details">0 / 100 Account XP</div>
+                <div id="bp-splash-details" class="xp-splash-xp-details">Roster XP — Rank 1</div>
             </div>
 
             <div class="xp-module xp-splash-matchstats card-glass">
@@ -85,11 +85,13 @@
                 </div>
             </div>
 
-            <div class="xp-splash-actions">
+            <p id="splash-series-line" class="splash-series-line hidden" aria-live="polite"></p>
+            <div class="xp-splash-actions xp-splash-actions--rematch">
                 <button type="button" id="btn-rematch" class="menu-btn xp-splash-btn-rematch">
                     <span id="btn-rematch-label">Challenge Again</span>
                     <span id="rematch-status" class="rematch-status-line" aria-live="polite"></span>
                 </button>
+                <button type="button" id="btn-rematch-bo3" class="menu-btn secondary-btn xp-splash-btn-bo3">Best of 3</button>
                 <button type="button" id="btn-splash-exit" class="menu-btn secondary-btn xp-splash-btn-exit">Main Menu</button>
             </div>
         </div>
@@ -111,11 +113,40 @@
     <!-- MAIN MENU UI -->
     <div id="main-menu-container">
         <header class="main-menu-header">
-            <div class="main-menu-brand">
-                <h1 class="game-title">Lumen Clash</h1>
-                <p class="main-menu-tagline">Tactical arena · Real-time duels</p>
+            <div class="main-menu-header-inner">
+                <div class="main-menu-brand">
+                    <h1 class="game-title">Lumen Clash</h1>
+                    <p class="main-menu-tagline">Tactical arena · Real-time duels</p>
+                </div>
+                <div class="main-menu-header-right" aria-label="Account and activity">
+                    <div class="menu-player-identity card-glass">
+                        <span id="menu-header-title" class="menu-player-eyebrow"></span>
+                        <span id="menu-header-username" class="menu-header-username">…</span>
+                        <span id="menu-header-rank" class="menu-header-rank">Rank 1</span>
+                    </div>
+                    <button type="button" id="btn-menu-activity" class="menu-icon-btn" aria-label="Activity inbox" aria-expanded="false" aria-haspopup="true" aria-controls="menu-activity-popover" title="Activity">
+                        <span class="menu-icon-bell" aria-hidden="true">🔔</span>
+                        <span id="menu-activity-badge" class="menu-activity-badge hidden" aria-hidden="true">0</span>
+                    </button>
+                </div>
             </div>
         </header>
+
+        <div id="menu-activity-popover" class="menu-activity-popover hidden" role="region" aria-labelledby="menu-activity-title">
+            <div class="menu-activity-popover-inner card-glass">
+                <div class="menu-activity-popover-head">
+                    <h2 id="menu-activity-title" class="menu-activity-popover-title">Activity</h2>
+                    <button type="button" id="btn-menu-activity-close" class="menu-activity-close" aria-label="Close activity">✕</button>
+                </div>
+                <div id="menu-activity-popover-body" class="menu-activity-popover-body"></div>
+                <p class="menu-activity-popover-footnote">Quests, seasonal rewards, and live events will show up here in a future update.</p>
+            </div>
+        </div>
+
+        <div id="menu-duel-invite-toast" class="menu-duel-invite-toast hidden" role="status">
+            <span class="menu-duel-invite-toast-text">You have a pending duel invite.</span>
+            <button type="button" id="btn-duel-toast-social" class="menu-duel-invite-toast-btn">Open Social</button>
+        </div>
 
         <div class="main-menu-layout">
             <nav class="main-menu-sidebar main-menu-nav" aria-label="Main menu">
@@ -219,7 +250,8 @@
             </div>
             <p style="margin-top: 10px;">Level: <span id="profile-level">...</span></p>
             <div class="xp-bar-bg" style="margin: 5px auto;"><div class="xp-bar-fill" id="profile-xp-fill"></div></div>
-            <p style="font-size:12px; margin-bottom:10px;"><span id="profile-xp-text">0/100</span> XP</p>
+            <p style="font-size:12px; margin-bottom:10px;"><span id="profile-xp-text">0 / 300</span> roster XP</p>
+            <p style="font-size:11px; margin:-6px 0 10px; opacity:0.55;">Bar = progress across all classes (rank rises when any class levels up).</p>
             <p style="font-size:14px; color:#aaa;">Wins: <span id="profile-wins">0</span> | Losses: <span id="profile-losses">0</span></p>
         </div>
 

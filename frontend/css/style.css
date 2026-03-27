@@ -337,9 +337,218 @@ h1, h2, h3, .game-title, .action-btn, .menu-btn, .ability-name, .lb-rank {
     z-index: 1;
 }
 
-.main-menu-brand {
+.main-menu-header-inner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px 28px;
     max-width: 1400px;
     margin: 0 auto;
+    width: 100%;
+}
+
+.main-menu-brand {
+    margin: 0;
+    flex: 1 1 220px;
+    min-width: 0;
+}
+
+.main-menu-header-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+.menu-player-identity {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    text-align: right;
+    padding: 10px 16px;
+    border-radius: 12px;
+    min-width: 0;
+    max-width: min(280px, 46vw);
+}
+
+.menu-player-eyebrow {
+    margin: 0;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: rgba(160, 185, 230, 0.55);
+    font-family: 'Outfit', sans-serif;
+}
+
+.menu-header-username {
+    margin: 2px 0 0;
+    font-family: 'Rajdhani', sans-serif;
+    font-size: clamp(1rem, 2.2vw, 1.2rem);
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: #f0f6ff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+.menu-header-rank {
+    margin: 2px 0 0;
+    font-family: 'Outfit', sans-serif;
+    font-size: 0.78rem;
+    color: rgba(0, 210, 255, 0.75);
+    letter-spacing: 0.06em;
+}
+
+.menu-icon-btn {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 46px;
+    height: 46px;
+    padding: 0;
+    border-radius: 12px;
+    border: 1px solid rgba(0, 210, 255, 0.28);
+    background: rgba(255, 255, 255, 0.04);
+    color: rgba(230, 240, 255, 0.92);
+    cursor: pointer;
+    transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.menu-icon-btn:hover {
+    background: rgba(0, 210, 255, 0.1);
+    border-color: rgba(0, 210, 255, 0.45);
+    box-shadow: 0 0 20px rgba(0, 210, 255, 0.15);
+}
+
+.menu-icon-btn:focus-visible {
+    outline: 2px solid #00d2ff;
+    outline-offset: 2px;
+}
+
+.menu-icon-bell {
+    font-size: 1.25rem;
+    line-height: 1;
+}
+
+.menu-activity-badge {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: linear-gradient(145deg, #ff3366, #cc0066);
+    color: #fff;
+    font-size: 0.65rem;
+    font-weight: 700;
+    font-family: 'Outfit', sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 0 10px rgba(255, 51, 102, 0.5);
+    border: 2px solid rgba(8, 10, 24, 0.95);
+}
+
+.menu-activity-popover {
+    position: fixed;
+    z-index: 220;
+    top: calc(72px + env(safe-area-inset-top, 0px));
+    right: max(16px, env(safe-area-inset-right, 0px));
+    width: min(340px, calc(100vw - 32px));
+    pointer-events: none;
+}
+
+.menu-activity-popover:not(.hidden) {
+    pointer-events: auto;
+}
+
+.menu-activity-popover-inner {
+    padding: 14px 16px 12px;
+    border-radius: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+
+.menu-activity-popover-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.menu-activity-popover-title {
+    margin: 0;
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 1.15rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #e8f4ff;
+}
+
+.menu-activity-close {
+    border: none;
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(230, 235, 255, 0.85);
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+}
+
+.menu-activity-close:hover {
+    background: rgba(255, 255, 255, 0.14);
+}
+
+.menu-activity-popover-body {
+    font-family: 'Outfit', sans-serif;
+    font-size: 0.88rem;
+    color: rgba(210, 218, 245, 0.92);
+    line-height: 1.45;
+}
+
+.menu-activity-popover-body .menu-activity-empty {
+    margin: 8px 0 12px;
+    color: rgba(180, 190, 220, 0.65);
+    font-size: 0.9rem;
+}
+
+.menu-activity-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    margin: 0 0 8px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid rgba(0, 210, 255, 0.2);
+    background: rgba(0, 210, 255, 0.06);
+    color: #c8f0ff;
+    font-family: 'Outfit', sans-serif;
+    font-size: 0.86rem;
+    cursor: pointer;
+}
+
+.menu-activity-item:hover {
+    background: rgba(0, 210, 255, 0.12);
+}
+
+.menu-activity-popover-footnote {
+    margin: 12px 0 0;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: rgba(150, 165, 200, 0.55);
+    font-family: 'Outfit', sans-serif;
 }
 
 .main-menu-tagline {
@@ -452,18 +661,18 @@ h1, h2, h3, .game-title, .action-btn, .menu-btn, .ability-name, .lb-rank {
 }
 
 .menu-nav-label {
-    font-size: 0.95rem;
+    font-size: 1.08rem;
     font-weight: 600;
     letter-spacing: 0.06em;
     text-transform: uppercase;
 }
 
 .menu-nav-hint {
-    font-size: 0.72rem;
+    font-size: 0.84rem;
     font-weight: 400;
     letter-spacing: 0.04em;
-    color: rgba(180, 190, 220, 0.45);
-    margin-top: 2px;
+    color: rgba(190, 200, 230, 0.58);
+    margin-top: 3px;
     font-family: 'Outfit', sans-serif;
 }
 
@@ -485,7 +694,7 @@ h1, h2, h3, .game-title, .action-btn, .menu-btn, .ability-name, .lb-rank {
 }
 
 .menu-nav-pass .menu-nav-text {
-    font-size: 0.82rem;
+    font-size: 0.93rem;
     font-weight: 700;
     letter-spacing: 0.14em;
     text-transform: uppercase;
@@ -500,7 +709,7 @@ h1, h2, h3, .game-title, .action-btn, .menu-btn, .ability-name, .lb-rank {
     background: rgba(0, 0, 0, 0.55);
     border: 1px solid rgba(255, 204, 0, 0.35);
     color: #ffcc66;
-    font-size: 0.72rem;
+    font-size: 0.8rem;
     font-weight: 700;
     letter-spacing: 0.04em;
     text-align: center;
@@ -1355,6 +1564,87 @@ h1, h2, h3, .game-title, .action-btn, .menu-btn, .ability-name, .lb-rank {
     pointer-events: auto;
 }
 
+.xp-splash-actions--rematch {
+    flex-wrap: wrap;
+    justify-content: center;
+}
+
+.xp-splash-actions--rematch .xp-splash-btn-rematch {
+    flex: 2 1 200px;
+}
+
+.xp-splash-actions--rematch .xp-splash-btn-bo3 {
+    flex: 1 1 140px;
+    padding: 14px 12px;
+    font-size: 0.92rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border: 1px solid rgba(0, 210, 255, 0.35);
+    background: rgba(0, 210, 255, 0.12);
+    color: #9ef0ff;
+}
+
+.xp-splash-actions--rematch .xp-splash-btn-exit {
+    flex: 1 1 120px;
+}
+
+.splash-series-line {
+    margin: 6px 0 0;
+    padding: 0 12px;
+    text-align: center;
+    font-family: 'Outfit', sans-serif;
+    font-size: 0.95rem;
+    color: rgba(190, 225, 255, 0.95);
+    letter-spacing: 0.04em;
+    max-width: 440px;
+    width: 100%;
+    line-height: 1.35;
+}
+
+.splash-series-line.series-complete {
+    color: #ffcc80;
+    font-weight: 600;
+}
+
+.menu-duel-invite-toast {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+    margin: 10px 24px 0;
+    padding: 10px 18px;
+    border-radius: 10px;
+    background: rgba(255, 170, 60, 0.1);
+    border: 1px solid rgba(255, 200, 120, 0.38);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+}
+
+.menu-duel-invite-toast-text {
+    font-family: 'Outfit', sans-serif;
+    font-size: 0.88rem;
+    color: rgba(255, 235, 210, 0.95);
+}
+
+.menu-duel-invite-toast-btn {
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid rgba(0, 255, 204, 0.45);
+    background: rgba(0, 255, 204, 0.15);
+    color: #7fffea;
+    cursor: pointer;
+}
+
+.menu-duel-invite-toast-btn:hover {
+    background: rgba(0, 255, 204, 0.25);
+}
+
 .xp-splash-btn-rematch {
     flex: 2;
     position: relative;
@@ -1795,6 +2085,18 @@ h1, h2, h3, .game-title, .action-btn, .menu-btn, .ability-name, .lb-rank {
         padding-top: calc(8px + env(safe-area-inset-top, 0px));
         padding-bottom: 4px;
     }
+    .main-menu-header-inner {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 10px;
+    }
+    .main-menu-header-right {
+        width: 100%;
+        justify-content: flex-end;
+    }
+    .menu-activity-popover {
+        top: calc(56px + env(safe-area-inset-top, 0px));
+    }
     .main-menu-tagline {
         letter-spacing: 0.2em;
         font-size: 0.65rem;
@@ -1827,7 +2129,7 @@ h1, h2, h3, .game-title, .action-btn, .menu-btn, .ability-name, .lb-rank {
         padding: 10px 12px;
     }
     .menu-nav-label {
-        font-size: 0.8rem;
+        font-size: 0.95rem;
     }
     .main-menu-center {
         padding: 0;
@@ -2294,7 +2596,13 @@ html.pref-a11y-large .game-title {
     letter-spacing: 0.12em;
 }
 html.pref-a11y-large .menu-nav-label {
-    font-size: 1.02rem;
+    font-size: 1.16rem;
+}
+html.pref-a11y-large .menu-nav-hint {
+    font-size: 0.95rem;
+}
+html.pref-a11y-large .menu-nav-pass .menu-nav-text {
+    font-size: 1rem;
 }
 html.pref-a11y-large .ability-btn {
     min-width: 118px;
@@ -2412,8 +2720,10 @@ html.pref-menu-vfx-off #menu-background-layer::after {
         gap: 10px;
     }
     .xp-splash-btn-rematch,
+    .xp-splash-btn-bo3,
     .xp-splash-btn-exit {
         width: 100%;
+        flex: none !important;
     }
 }
 
@@ -2438,7 +2748,7 @@ html.pref-menu-vfx-off #menu-background-layer::after {
         border-radius: 10px;
     }
     .menu-nav-label {
-        font-size: 0.8rem;
+        font-size: 0.95rem;
     }
     .menu-nav-hint {
         display: none;

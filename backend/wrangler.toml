@@ -2,26 +2,67 @@ name = "lumen-clash-backend"
 main = "src/index.js"
 compatibility_date = "2024-03-20"
 compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+routes = [
+  { pattern = "warpgamestv.com/play*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/profile*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/set-username*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/save-customization*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/leaderboard*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/add-friend*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/remove-friend*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/friends-status*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/create-private*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/join-private*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/update-presence*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/accept-friend*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/decline-friend*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/lobby-update*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/system-reset*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/reset-player*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/friend-duel-invite*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/friend-duel-decline*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/friend-duel-accept*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/play*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/profile*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/set-username*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/save-customization*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/leaderboard*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/add-friend*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/remove-friend*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/friends-status*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/create-private*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/join-private*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/update-presence*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/accept-friend*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/decline-friend*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/lobby-update*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/system-reset*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/reset-player*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/friend-duel-invite*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/friend-duel-decline*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/friend-duel-accept*", zone_name = "warpgamestv.com" }
+]
 
 [[migrations]]
 tag = "v1"
-new_classes = ["GameRoom"]
+new_sqlite_classes = ["GameRoom"]
 
 [[migrations]]
 tag = "v2"
-new_classes = ["Matchmaker"]
+new_sqlite_classes = ["Matchmaker"]
 
 [[migrations]]
 tag = "v3"
-new_classes = ["PlayerProfile"]
+new_sqlite_classes = ["PlayerProfile"]
 
 [[migrations]]
 tag = "v4"
-new_classes = ["UsernameRegistry"]
+new_sqlite_classes = ["UsernameRegistry"]
 
 [[migrations]]
 tag = "v5"
-new_classes = ["Leaderboard"]
+new_sqlite_classes = ["Leaderboard"]
 
 [[durable_objects.bindings]]
 name = "GAME_ROOM"
@@ -42,3 +83,4 @@ class_name = "UsernameRegistry"
 [[durable_objects.bindings]]
 name = "LEADERBOARD"
 class_name = "Leaderboard"
+

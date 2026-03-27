@@ -1,3 +1,32 @@
+const ALLOWED_ORIGINS = new Set([
+	'https://warpgamestv.com',
+	'https://www.warpgamestv.com'
+]);
+
+const rateLimitBuckets = new Map();
+
+function corsHeaders(request, extra = {}) {
+	const origin = request.headers.get('Origin');
+	const allowedOrigin = ALLOWED_ORIGINS.has(origin) ? origin : 'https://warpgamestv.com';
+	return {
+		...extra,
+		'Access-Control-Allow-Origin': allowedOrigin,
+		'Vary': 'Origin'
+	};
+}
+
+function isRateLimited(key, limit, windowMs) {
+	const now = Date.now();
+	const bucket = rateLimitBuckets.get(key);
+	if (!bucket || now > bucket.resetAt) {
+		rateLimitBuckets.set(key, { count: 1, resetAt: now + windowMs });
+		return false;
+	}
+	if (bucket.count >= limit) return true;
+	bucket.count += 1;
+	return false;
+}
+
 export default {
 	async fetch(request, env, ctx) {
 		const url = new URL(request.url);
@@ -37,7 +66,7 @@ export default {
 
 		if (url.pathname === '/set-username' || url.pathname === '/save-customization') {
 			if (request.method === 'OPTIONS') {
-				return new Response(null, { headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'Content-Type' } });
+				return new Response(null, { headers: corsHeaders(request, { 'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'Content-Type' }) });
 			}
 			
 			if (url.pathname === '/save-customization') {
@@ -61,25 +90,29 @@ export default {
 				const body = await request.json();
 				const uid = body.uid;
 				const newName = (body.username || '').trim();
-				if (!uid || !newName) return new Response(JSON.stringify({ ok: false, error: 'Missing fields' }), { status: 400, headers: { 'Access-Control-Allow-Origin': '*' } });
-				if (newName.length < 3 || newName.length > 16) return new Response(JSON.stringify({ ok: false, error: 'Username must be 3-16 characters' }), { status: 400, headers: { 'Access-Control-Allow-Origin': '*' } });
-				if (!/^[a-zA-Z0-9_]+$/.test(newName)) return new Response(JSON.stringify({ ok: false, error: 'Letters, numbers, and underscores only' }), { status: 400, headers: { 'Access-Control-Allow-Origin': '*' } });
+				const clientIp = request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || 'unknown';
+				if (isRateLimited(`set-username:${uid || clientIp}:${clientIp}`, 8, 60_000)) {
+					return new Response(JSON.stringify({ ok: false, error: 'Too many rename attempts. Try again in a minute.' }), { status: 429, headers: corsHeaders(request) });
+				}
+				if (!uid || !newName) return new Response(JSON.stringify({ ok: false, error: 'Missing fields' }), { status: 400, headers: corsHeaders(request) });
+				if (newName.length < 3 || newName.length > 16) return new Response(JSON.stringify({ ok: false, error: 'Username must be 3-16 characters' }), { status: 400, headers: corsHeaders(request) });
+				if (!/^[a-zA-Z0-9_]+$/.test(newName)) return new Response(JSON.stringify({ ok: false, error: 'Letters, numbers, and underscores only' }), { status: 400, headers: corsHeaders(request) });
 
 				// Check uniqueness via global registry
 				let regId = env.USERNAME_REGISTRY.idFromName('global');
 				let registry = env.USERNAME_REGISTRY.get(regId);
 				let regRes = await registry.fetch(new Request(`http://internal/claim?name=${encodeURIComponent(newName)}&uid=${uid}`));
 				let regData = await regRes.json();
-				if (!regData.ok) return new Response(JSON.stringify(regData), { status: 409, headers: { 'Access-Control-Allow-Origin': '*' } });
+				if (!regData.ok) return new Response(JSON.stringify(regData), { status: 409, headers: corsHeaders(request) });
 
 				// Save in profile
 				let profileId = env.PLAYER_PROFILE.idFromName(uid);
 				let profile = env.PLAYER_PROFILE.get(profileId);
 				await profile.fetch(new Request(`http://internal/set-name?name=${encodeURIComponent(newName)}`));
 
-				return new Response(JSON.stringify({ ok: true, username: newName }), { headers: { 'Access-Control-Allow-Origin': '*' } });
+				return new Response(JSON.stringify({ ok: true, username: newName }), { headers: corsHeaders(request) });
 			} catch(e) {
-				return new Response(JSON.stringify({ ok: false, error: 'Invalid request' }), { status: 400, headers: { 'Access-Control-Allow-Origin': '*' } });
+				return new Response(JSON.stringify({ ok: false, error: 'Invalid request' }), { status: 400, headers: corsHeaders(request) });
 			}
 		}
 
@@ -92,6 +125,10 @@ export default {
 		if (url.pathname === '/add-friend') {
 			const body = await request.json();
 			const { uid, friendName } = body;
+			const clientIp = request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || 'unknown';
+			if (isRateLimited(`add-friend:${uid || clientIp}:${clientIp}`, 25, 60_000)) {
+				return new Response(JSON.stringify({ ok: false, error: 'Rate limit exceeded. Try again shortly.' }), { status: 429, headers: { 'Content-Type': 'application/json' } });
+			}
 			if (!uid || !friendName) return new Response('Missing fields', { status: 400 });
 			
 			// 1. Find friend's UID
@@ -150,6 +187,109 @@ export default {
 			let res = await p.fetch(new Request(`http://internal/get-lobby-data`));
 			let data = await res.json();
 			return new Response(JSON.stringify(data.social), { headers: { 'Content-Type': 'application/json' }});
+		}
+
+		const jsonHeaders = corsHeaders(request, { 'Content-Type': 'application/json' });
+
+		if (url.pathname === '/update-presence' && request.method === 'POST') {
+			try {
+				const body = await request.json();
+				const uid = body.uid;
+				if (!uid) return new Response(JSON.stringify({ ok: false, error: 'Missing uid' }), { status: 400, headers: jsonHeaders });
+				const profile = env.PLAYER_PROFILE.get(env.PLAYER_PROFILE.idFromName(uid));
+				return profile.fetch(
+					new Request('http://internal/update-presence', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ state: body.state })
+					})
+				);
+			} catch (e) {
+				return new Response(JSON.stringify({ ok: false }), { status: 400, headers: jsonHeaders });
+			}
+		}
+
+		if (url.pathname === '/friend-duel-invite' && request.method === 'POST') {
+			try {
+				const body = await request.json();
+				const { uid, targetUid } = body;
+				const clientIp = request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || 'unknown';
+				if (isRateLimited(`friend-duel-invite:${uid || clientIp}:${clientIp}`, 20, 60_000)) {
+					return new Response(JSON.stringify({ ok: false, error: 'Rate limit exceeded. Try again shortly.' }), { status: 429, headers: jsonHeaders });
+				}
+				if (!uid || !targetUid || uid === targetUid) {
+					return new Response(JSON.stringify({ ok: false, error: 'Invalid request' }), { status: 400, headers: jsonHeaders });
+				}
+				const pSelf = env.PLAYER_PROFILE.get(env.PLAYER_PROFILE.idFromName(uid));
+				const selfRes = await pSelf.fetch(new Request('http://internal/get-stats'));
+				const selfData = await selfRes.json();
+				if (!selfData.friends || !selfData.friends.includes(targetUid)) {
+					return new Response(JSON.stringify({ ok: false, error: 'You can only challenge friends' }), { status: 403, headers: jsonHeaders });
+				}
+				const mmId = env.MATCHMAKER.idFromName('global-matchmaker');
+				const mmRes = await env.MATCHMAKER.get(mmId).fetch(new Request('http://internal/create-private'));
+				const roomPayload = await mmRes.json();
+				if (!roomPayload.roomId || !roomPayload.code) {
+					return new Response(JSON.stringify({ ok: false, error: 'Could not create room' }), { status: 500, headers: jsonHeaders });
+				}
+				const pTarget = env.PLAYER_PROFILE.get(env.PLAYER_PROFILE.idFromName(targetUid));
+				await pTarget.fetch(
+					new Request('http://internal/duel-invite-add', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({
+							fromUid: uid,
+							roomId: roomPayload.roomId,
+							code: roomPayload.code
+						})
+					})
+				);
+				return new Response(
+					JSON.stringify({ ok: true, roomId: roomPayload.roomId, code: roomPayload.code }),
+					{ headers: jsonHeaders }
+				);
+			} catch (e) {
+				return new Response(JSON.stringify({ ok: false, error: 'Server error' }), { status: 500, headers: jsonHeaders });
+			}
+		}
+
+		if (url.pathname === '/friend-duel-decline' && request.method === 'POST') {
+			try {
+				const body = await request.json();
+				const { uid, fromUid } = body;
+				if (!uid || !fromUid) return new Response(JSON.stringify({ ok: false }), { status: 400, headers: jsonHeaders });
+				const p = env.PLAYER_PROFILE.get(env.PLAYER_PROFILE.idFromName(uid));
+				await p.fetch(
+					new Request('http://internal/duel-invite-remove', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ fromUid })
+					})
+				);
+				return new Response(JSON.stringify({ ok: true }), { headers: jsonHeaders });
+			} catch (e) {
+				return new Response(JSON.stringify({ ok: false }), { status: 400, headers: jsonHeaders });
+			}
+		}
+
+		if (url.pathname === '/friend-duel-accept' && request.method === 'POST') {
+			try {
+				const body = await request.json();
+				const { uid, fromUid } = body;
+				if (!uid || !fromUid) return new Response(JSON.stringify({ ok: false }), { status: 400, headers: jsonHeaders });
+				const p = env.PLAYER_PROFILE.get(env.PLAYER_PROFILE.idFromName(uid));
+				const res = await p.fetch(
+					new Request('http://internal/duel-invite-take', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ fromUid })
+					})
+				);
+				const data = await res.json();
+				return new Response(JSON.stringify(data), { headers: jsonHeaders });
+			} catch (e) {
+				return new Response(JSON.stringify({ ok: false }), { status: 400, headers: jsonHeaders });
+			}
 		}
 
 		if (url.pathname === '/create-private') {
@@ -219,9 +359,11 @@ export default {
 			return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' }});
 		}
 
-		return new Response('Lumen Clash API Server', { status: 200, headers: { 'Access-Control-Allow-Origin': '*' } });
+		return new Response('Lumen Clash API Server', { status: 200, headers: corsHeaders(request) });
 	},
 };
+
+const DUEL_INVITE_TTL_MS = 15 * 60 * 1000;
 
 // Random username generator
 const ADJECTIVES = ['Swift','Bold','Dark','Neon','Iron','Void','Frost','Storm','Shadow','Blaze','Cyber','Ember','Lunar','Phantom','Crimson','Crystal','Thunder','Silver','Atomic','Stellar'];
@@ -231,6 +373,25 @@ function generateRandomUsername() {
 	const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
 	const num = Math.floor(Math.random() * 999);
 	return `${adj}${noun}${num}`;
+}
+
+/** Account rank = sum(class.level) - (n - 1); baseline all at 1 => rank 1 */
+function syncAccountLevelFromClasses(stats) {
+	const cls = stats.classes || {};
+	const keys = Object.keys(cls);
+	if (keys.length === 0) {
+		stats.level = 1;
+		return false;
+	}
+	let sum = 0;
+	for (const k of keys) {
+		const c = cls[k];
+		sum += Math.max(1, Number(c && c.level) || 1);
+	}
+	const next = sum - (keys.length - 1);
+	const changed = stats.level !== next;
+	stats.level = next;
+	return changed;
 }
 
 export class PlayerProfile {
@@ -290,7 +451,10 @@ export class PlayerProfile {
 		}
 
 		if (url.pathname === '/get-stats') {
-			return new Response(JSON.stringify(stats), { headers: { 'Access-Control-Allow-Origin': '*' } });
+			if (syncAccountLevelFromClasses(stats)) {
+				await this.state.storage.put('stats', stats);
+			}
+			return new Response(JSON.stringify(stats), { headers: corsHeaders(request) });
 		}
 
 		if (url.pathname === '/set-name') {
@@ -301,7 +465,7 @@ export class PlayerProfile {
 
 		if (url.pathname === '/add-xp') {
 			let isWin = url.searchParams.get('win') === 'true';
-			let classId = url.searchParams.get('classId') || 'knight';
+			let classId = url.searchParams.get('classId') || 'aegisKnight';
 			let xpGained = isWin ? 50 : 10;
 			
 			// Update Global Stats
@@ -324,9 +488,8 @@ export class PlayerProfile {
 				leveledUp = true;
 			}
 
-			// Update Account Level (Sum of all class levels)
 			const oldAccountLevel = stats.level;
-			stats.level = Object.values(stats.classes).reduce((acc, obj) => acc + obj.level, 0) - (Object.keys(stats.classes).length - 1);
+			syncAccountLevelFromClasses(stats);
 
 			// Check Battle Pass Rewards
 			const REWARDS = {
@@ -396,9 +559,53 @@ export class PlayerProfile {
 		}
 
 		if (url.pathname === '/update-presence') {
+			let body = {};
+			try {
+				body = await request.json();
+			} catch (e) {}
+			const allowed = new Set(['menu', 'match', 'private_lobby', 'away']);
+			const state = allowed.has(body.state) ? body.state : 'menu';
+			stats.clientPresence = state;
 			stats.lastSeen = Date.now();
 			await this.state.storage.put('stats', stats);
-			return new Response('OK');
+			return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' } });
+		}
+
+		if (url.pathname === '/duel-invite-add') {
+			const { fromUid, roomId, code } = await request.json();
+			if (!fromUid || !roomId || !code) return new Response(JSON.stringify({ ok: false }), { status: 400 });
+			stats.duelInvites = stats.duelInvites || [];
+			const now = Date.now();
+			stats.duelInvites = stats.duelInvites.filter((i) => now - (i.ts || 0) < DUEL_INVITE_TTL_MS && i.fromUid !== fromUid);
+			stats.duelInvites.push({ fromUid, roomId, code, ts: now });
+			if (stats.duelInvites.length > 8) stats.duelInvites = stats.duelInvites.slice(-8);
+			await this.state.storage.put('stats', stats);
+			return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' } });
+		}
+
+		if (url.pathname === '/duel-invite-remove') {
+			const body = await request.json();
+			const fromUid = body.fromUid;
+			if (!fromUid) return new Response(JSON.stringify({ ok: false }), { status: 400 });
+			stats.duelInvites = (stats.duelInvites || []).filter((i) => i.fromUid !== fromUid);
+			await this.state.storage.put('stats', stats);
+			return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' } });
+		}
+
+		if (url.pathname === '/duel-invite-take') {
+			const body = await request.json();
+			const fromUid = body.fromUid;
+			if (!fromUid) return new Response(JSON.stringify({ ok: false, error: 'Missing fromUid' }), { status: 400 });
+			const now = Date.now();
+			stats.duelInvites = stats.duelInvites || [];
+			const inv = stats.duelInvites.find((i) => i.fromUid === fromUid && now - (i.ts || 0) < DUEL_INVITE_TTL_MS);
+			if (!inv) return new Response(JSON.stringify({ ok: false, error: 'Invite expired or not found' }), { status: 404 });
+			stats.duelInvites = stats.duelInvites.filter((i) => i.fromUid !== fromUid);
+			await this.state.storage.put('stats', stats);
+			return new Response(
+				JSON.stringify({ ok: true, roomId: inv.roomId, code: inv.code }),
+				{ headers: { 'Content-Type': 'application/json' } }
+			);
 		}
 
 		if (url.pathname === '/friend-request') {
@@ -452,6 +659,8 @@ export class PlayerProfile {
 			stats.friends = stats.friends || [];
 			stats.friendRequests = stats.friendRequests || [];
 			
+			const ONLINE_GRACE_MS = 90000;
+
 			const fetchDetails = async (uids) => {
 				const results = [];
 				for (const fUid of uids) {
@@ -459,16 +668,52 @@ export class PlayerProfile {
 						let fProfile = this.env.PLAYER_PROFILE.get(this.env.PLAYER_PROFILE.idFromName(fUid));
 						let fRes = await fProfile.fetch(new Request(`http://internal/get-stats`));
 						let fData = await fRes.json();
+						const online = Date.now() - (fData.lastSeen || 0) < ONLINE_GRACE_MS;
+						const p = fData.clientPresence || 'menu';
+						const presenceLabel = !online
+							? 'Offline'
+							: p === 'match'
+								? 'In match'
+								: p === 'private_lobby'
+									? 'Private lobby'
+									: p === 'away'
+										? 'Away'
+										: 'In menu';
 						results.push({
 							uid: fUid,
 							username: fData.username,
 							level: fData.level,
-							status: (Date.now() - (fData.lastSeen || 0) < 60000) ? 'Online' : 'Offline'
+							status: online ? 'Online' : 'Offline',
+							presenceLabel
 						});
 					} catch(e) {}
 				}
 				return results;
 			};
+
+			const now = Date.now();
+			stats.duelInvites = stats.duelInvites || [];
+			const freshDuels = stats.duelInvites.filter((i) => now - (i.ts || 0) < DUEL_INVITE_TTL_MS);
+			if (freshDuels.length !== stats.duelInvites.length) {
+				stats.duelInvites = freshDuels;
+				await this.state.storage.put('stats', stats);
+			}
+
+			const duelInvitesResolved = [];
+			for (const inv of freshDuels) {
+				try {
+					const fp = this.env.PLAYER_PROFILE.get(this.env.PLAYER_PROFILE.idFromName(inv.fromUid));
+					const fr = await fp.fetch(new Request(`http://internal/get-stats`));
+					const fd = await fr.json();
+					duelInvitesResolved.push({
+						fromUid: inv.fromUid,
+						fromUsername: fd.username || 'Player',
+						roomId: inv.roomId,
+						code: inv.code,
+						ts: inv.ts
+					});
+				} catch (e) {}
+			}
 			
 			const [friendsArr, requestsArr] = await Promise.all([
 				fetchDetails(stats.friends),
@@ -479,7 +724,8 @@ export class PlayerProfile {
 				profile: stats,
 				social: {
 					friends: friendsArr,
-					requests: requestsArr
+					requests: requestsArr,
+					duelInvites: duelInvitesResolved
 				}
 			}));
 		}
@@ -550,6 +796,8 @@ export class GameRoom {
 		this.sessions = [];
 		this.turnTimer = null;
 		this.rematchVotes = new Set();
+		/** @type {Map<string, 'single'|'bo3'|'continue'>} */
+		this.rematchModes = new Map();
 		this.gameState = {
 			status: 'WAITING_FOR_PLAYERS',
 			turn: 0,
@@ -749,19 +997,51 @@ export class GameRoom {
 				return;
 			}
 
-			// Rematch logic
+			// Rematch / Bo3 series
 			if (data.action === 'rematch' && this.gameState.status === 'GAME_OVER') {
-				this.rematchVotes.add(playerId);
-				
-				if (this.rematchVotes.size === 2) {
-					// Restart Game
+				let choice = data.series === 'bo3' ? 'bo3' : data.series === 'continue' ? 'continue' : 'single';
+				const ser = this.gameState.series;
+				if (ser && !ser.complete) choice = 'continue';
+
+				this.rematchModes.set(playerId, choice);
+
+				if (this.rematchModes.size === 2) {
+					const modes = [...this.rematchModes.values()];
+					this.rematchModes.clear();
 					this.rematchVotes.clear();
-					
-					// Re-init health and abilities
+
+					if (modes[0] !== modes[1]) {
+						const statusMsg = JSON.stringify({ type: 'REMATCH_MODE_MISMATCH' });
+						this.sessions.forEach(s => { try { s.ws.send(statusMsg); } catch(e) {} });
+						return;
+					}
+
+					const mode = modes[0];
+					if (mode === 'continue' && (!this.gameState.series || this.gameState.series.complete)) {
+						const statusMsg = JSON.stringify({ type: 'REMATCH_MODE_MISMATCH' });
+						this.sessions.forEach(s => { try { s.ws.send(statusMsg); } catch(e) {} });
+						return;
+					}
+
+					if (mode === 'single') {
+						this.gameState.series = null;
+					} else if (mode === 'bo3') {
+						const s = this.gameState.series;
+						if (!s || s.complete) {
+							const p1w = this.gameState.players.p1.health > 0 ? 1 : 0;
+							const p2w = this.gameState.players.p2.health > 0 ? 1 : 0;
+							this.gameState.series = { p1Wins: p1w, p2Wins: p2w, needed: 2, complete: false };
+						}
+					}
+
+					for (const pId of ['p1', 'p2']) {
+						const p = this.gameState.players[pId];
+						if (p) delete p.postGame;
+					}
+
 					for (const pId of ['p1', 'p2']) {
 						const p = this.gameState.players[pId];
 						const classData = this.getClassData(p.classId);
-						// Base + Level Bonuses
 						const hpBonus = (p.level - 1) * 10;
 						p.maxHealth = classData.hp + hpBonus;
 						p.health = p.maxHealth;
@@ -775,8 +1055,7 @@ export class GameRoom {
 					this.startTurnTimer();
 					this.broadcastState();
 				} else {
-					// Notify other player that this player wants a rematch
-					const statusMsg = JSON.stringify({ type: 'REMATCH_VOTE', pId: playerId });
+					const statusMsg = JSON.stringify({ type: 'REMATCH_VOTE', pId: playerId, choice });
 					this.sessions.forEach(s => { try { s.ws.send(statusMsg); } catch(e) {} });
 				}
 				return;
@@ -839,6 +1118,13 @@ export class GameRoom {
 				if (p1.health <= 0 || p2.health <= 0) {
 					this.gameState.status = 'GAME_OVER';
 					this.clearTurnTimer();
+
+					const ser = this.gameState.series;
+					if (ser && !ser.complete) {
+						if (p1.health > 0) ser.p1Wins = Math.min(ser.needed, ser.p1Wins + 1);
+						else if (p2.health > 0) ser.p2Wins = Math.min(ser.needed, ser.p2Wins + 1);
+						if (ser.p1Wins >= ser.needed || ser.p2Wins >= ser.needed) ser.complete = true;
+					}
 					
 					const awardXP = async (p, isWin) => {
 						if (!p || !p.uid) return null;
@@ -910,7 +1196,9 @@ export class GameRoom {
 			this.sessions = this.sessions.filter(s => s.ws !== ws);
 			this.gameState.status = 'WAITING_FOR_PLAYERS';
 			this.gameState.players = {};
+			this.gameState.series = null;
 			this.rematchVotes.clear();
+			this.rematchModes.clear();
 			this.sessions.forEach(s => {
 				try { s.ws.close(1011, "Opponent disconnected"); } catch(e) {}
 			});
@@ -920,7 +1208,7 @@ export class GameRoom {
 			// Private matches shouldn't be "re-listed".
 			if (this.myRoomId) {
 				let mmId = this.env.MATCHMAKER.idFromName('global-matchmaker');
-				let mm = env.MATCHMAKER.get(mmId);
+				let mm = this.env.MATCHMAKER.get(mmId);
 				if (this.myRoomId.includes('private')) {
 					// Delete from matchmaker registry
 					this.state.waitUntil(
@@ -1038,7 +1326,7 @@ export class Leaderboard {
 
 		if (url.pathname === '/top') {
 			let top50 = await this.state.storage.get('top50') || [];
-			return new Response(JSON.stringify(top50), { headers: { 'Access-Control-Allow-Origin': '*' } });
+			return new Response(JSON.stringify(top50), { headers: corsHeaders(request) });
 		}
 
 		if (url.pathname === '/get-top-cached') {

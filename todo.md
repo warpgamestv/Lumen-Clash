@@ -1,41 +1,42 @@
-# Lumen Clash Feature Roadmap
+# Lumen Clash TODO Ideas
 
-## ⚔️ Combat Depth
-- [x] Abilities with Cooldowns (3-4 unique abilities per class with multi-turn cooldowns)
-- [x] Shield / Block mechanic (defensive option each turn)
-- [x] Status Effects (poison, stun, burn, heal-over-time)
-- [x] Turn Timer (15s auto-forfeit)
+## High-Impact Next Features
+- [ ] Ranked ladder with soft resets per season.
+- [x] Post-match details screen (initial): damage dealt, damage taken, abilities used, turn swaps.
+- [ ] Character mastery tracks with cosmetic unlocks per class.
+- [ ] In-match ping/quick-comm wheel for better team communication vibes in duels.
 
-## 🏆 Competitive & Social
-- [x] Global Leaderboard (ranked by wins, win-rate, or level)
-- [ ] Friend System (add, remove, see online status)
-- [ ] Match Codes (private lobbies to play with friends)
-- [ ] Teams / Guilds (join groups for collective progression)
-- [ ] Match History (last 10 matches with opponent, result, XP)
-- [ ] Ranked Mode (ELO-based matchmaking)
-- [ ] Spectator Mode (watch live matches)
+## Gameplay Expansion
+- [ ] Add one new class built around traps or summons.
+- [ ] Introduce terrain modifiers (arcane zones, healing zones, line-of-sight blockers).
+- [ ] Add limited-time mutators (double cooldown speed, sudden death, mirrored loadouts).
+- [ ] Build a lightweight PvE boss challenge for daily rewards.
 
-## 👤 Player Identity & Settings
-- [x] Profile Page (Edit Username, View Match History, View Achievements)
-- [x] Settings Page (Wipe Save Data, Sound Settings, View Changelog, Emote Presets)
+## Progression & Economy
+- [ ] Daily/weekly quests tied to class playstyles.
+- [ ] Milestone achievements with profile badges and title rewards.
+- [ ] Better Battle Pass pacing with free and premium reward tracks.
+- [ ] Add a clean reward reveal flow for skins/emotes/titles.
 
-## 🎨 Cosmetics & Progression
-- [ ] Recolors & Basic Skins (Unlocked via level milestones)
-- [ ] Premium Currency (Earned via achievements/battle pass)
-- [ ] Premium Skins (Unlocked via premium currency)
-- [ ] Achievements System
-- [ ] Titles / Badges (achievement-based, shown by username)
-- [ ] Battle Pass / Seasonal Goals (weekly challenges)
+## Social & Retention
+- [ ] Spectator mode with delayed feed to prevent stream sniping.
+- [ ] Simple replay timeline (last 3 matches saved server-side).
+- [x] Friend challenge flow: one-click rematch and best-of-three invites.
+- [x] Presence upgrades (in menu, in match, spectating, away).
 
-## 🧩 Game Modes
-- [ ] Best of 3 (multi-round series with character switching)
-- [ ] Quick Play vs Ranked (casual mode with no rating impact)
-- [ ] Daily Challenge (AI boss fight for bonus XP)
+## UX & Presentation
+- [ ] Character preview scene with idle animation, VFX toggles, and skin comparisons.
+- [x] Accessibility pass (initial): larger text, high-contrast UI, high-visibility HP bar colors, reduce motion (Settings).
+- [x] Add optional hit-stop and camera shake intensity sliders.
+- [ ] Add controller support for menu navigation and ability selection.
 
-## 🔧 Quality of Life
-- [x] Custom Disconnect Modal (replace browser alert)
-- [x] Menu Click-to-Close & Back navigation
-- [x] Sound Effects & Music
-- [ ] Match Animations (victory/defeat screen with XP gain animation)
-- [x] Chat / Emotes (quick emotes during matches)
-- [ ] Rematch Button (play again without re-matchmaking)
+## Technical Polish
+- [ ] Asset pipeline step to auto-trim/alpha-clean sprite exports before shipping.
+- [x] Client performance overlay toggle for FPS + `/profile` round-trip ping (Settings).
+- [x] Better reconnect flow for temporary connection drops (auto-attempt up to 3 times).
+- [ ] Expand telemetry for balance tuning (ability pick/win rates by rank).
+
+## Future update roadmap (ideas)
+- [x] **v1.3 — Social & retention** (initial slice): richer friend presence (menu / in match / private lobby / away), direct challenge from friends list with accept/decline, post-match rematch + **Best of 3** series, duel-invite toast on the main menu.
+- [ ] **v1.4 — Luminary Pass & progression**: daily/weekly quests feeding pass XP, improved reward pacing and cadence, reward reveal / claim flow, optional season structure with resets and archive messaging.
+- [ ] **v1.5 — Competitive layer**: ranked queue with hidden MMR and visible tiers, Quick vs Ranked split in matchmaking, leaderboard filters by season or mode.
