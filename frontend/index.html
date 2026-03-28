@@ -10,7 +10,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
     
-    <link rel="stylesheet" href="css/style.css?v=24">
+    <link rel="stylesheet" href="css/style.css?v=26">
     <link rel="stylesheet" href="css/background.css?v=2">
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
     <script>
@@ -196,6 +196,30 @@
         <div id="matchmaking-overlay" class="hidden">
             <div class="spinner"></div>
             <h2 id="matchmaking-text">Finding Opponent...</h2>
+        </div>
+
+        <div id="hero-select-overlay" class="hidden">
+            <div class="hero-select-panel">
+                <div class="hero-select-head">
+                    <p class="hero-select-eyebrow">Pre-Match</p>
+                    <h2>Select Hero</h2>
+                    <p id="hero-select-subtext">Choose your hero and lock in.</p>
+                </div>
+                <div class="hero-select-grid">
+                    <button type="button" class="hero-select-card is-selected" data-hero-char="aegisKnight">Aegis Knight</button>
+                    <button type="button" class="hero-select-card" data-hero-char="lumenSage">Lumen Sage</button>
+                    <button type="button" class="hero-select-card" data-hero-char="voidWeaver">Void Weaver</button>
+                </div>
+                <div class="hero-select-skin-row">
+                    <label for="hero-select-skin">Skin</label>
+                    <select id="hero-select-skin"></select>
+                </div>
+                <div class="hero-select-ready-row">
+                    <button type="button" id="btn-hero-select-ready" class="menu-btn">Lock In</button>
+                    <p id="hero-select-timer">20s</p>
+                </div>
+                <p id="hero-ready-status">Waiting for both players...</p>
+            </div>
         </div>
     </div>
 
@@ -548,6 +572,6 @@
             <button type="button" id="btn-disconnect-ok" class="menu-btn disconnect-ok-btn">Return to Menu</button>
         </div>
     </div>
-    <script src="js/game.js?v=50"></script>
+    <script src="js/game.js?v=52"></script>
 </body>
 </html>

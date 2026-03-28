@@ -795,6 +795,7 @@ export class GameRoom {
 		this.env = env;
 		this.sessions = [];
 		this.turnTimer = null;
+		this.heroSelectTimer = null;
 		this.rematchVotes = new Set();
 		/** @type {Map<string, 'single'|'bo3'|'continue'>} */
 		this.rematchModes = new Map();
@@ -843,6 +844,89 @@ export class GameRoom {
 					]
 				};
 		}
+	}
+
+	startHeroSelectPhase() {
+		this.clearTurnTimer();
+		if (this.heroSelectTimer) {
+			clearTimeout(this.heroSelectTimer);
+			this.heroSelectTimer = null;
+		}
+		this.gameState.status = 'HERO_SELECT';
+		this.gameState.turnDeadline = null;
+		const deadline = Date.now() + 20000;
+		this.gameState.heroSelect = {
+			deadline,
+			players: {
+				p1: {
+					charId: this.gameState.players.p1 ? (this.gameState.players.p1.classId || 'voidWeaver') : 'voidWeaver',
+					skin: this.gameState.players.p1 ? (this.gameState.players.p1.equippedSkin || 'Default') : 'Default',
+					ready: false
+				},
+				p2: {
+					charId: this.gameState.players.p2 ? (this.gameState.players.p2.classId || 'voidWeaver') : 'voidWeaver',
+					skin: this.gameState.players.p2 ? (this.gameState.players.p2.equippedSkin || 'Default') : 'Default',
+					ready: false
+				}
+			}
+		};
+		this.broadcastHeroSelectUpdate();
+
+		this.heroSelectTimer = setTimeout(() => {
+			if (this.gameState.status !== 'HERO_SELECT') return;
+			for (const pId of ['p1', 'p2']) {
+				if (!this.gameState.heroSelect.players[pId]) continue;
+				this.gameState.heroSelect.players[pId].ready = true;
+			}
+			this.finalizeHeroSelectAndStartBattle();
+		}, 20000);
+	}
+
+	finalizeHeroSelectAndStartBattle() {
+		if (!this.gameState.heroSelect) return;
+		if (this.heroSelectTimer) {
+			clearTimeout(this.heroSelectTimer);
+			this.heroSelectTimer = null;
+		}
+		for (const pId of ['p1', 'p2']) {
+			const p = this.gameState.players[pId];
+			if (!p) continue;
+			const pick = this.gameState.heroSelect.players[pId] || {};
+			const classId = pick.charId || p.classId || 'voidWeaver';
+			const skinId = pick.skin || 'Default';
+			const classData = this.getClassData(classId);
+			const profile = p.profileStats || null;
+			const classProfile = profile && profile.classes ? profile.classes[classId] : null;
+			const level = classProfile && classProfile.level ? classProfile.level : 1;
+
+			p.classId = classId;
+			p.class = classData.name;
+			p.level = level;
+			p.equippedSkin = skinId;
+			p.abilities = classData.abilities.map(a => ({ ...a }));
+			p.shield = { active: false, percent: 0 };
+			p.dodge = false;
+			p.atkBonus = (level - 1) * 2;
+			p.maxHealth = classData.hp + ((level - 1) * 10);
+			p.health = p.maxHealth;
+		}
+
+		this.gameState.status = 'IN_PROGRESS';
+		this.gameState.turn = 0;
+		delete this.gameState.heroSelect;
+		this.startTurnTimer();
+		this.broadcastState();
+	}
+
+	broadcastHeroSelectUpdate() {
+		if (!this.gameState.heroSelect) return;
+		const msg = JSON.stringify({
+			type: 'HERO_SELECT_UPDATE',
+			heroSelect: this.gameState.heroSelect
+		});
+		this.sessions.forEach(s => {
+			try { s.ws.send(msg); } catch (e) {}
+		});
 	}
 
 	async fetch(request) {
@@ -927,6 +1011,9 @@ export class GameRoom {
 				let profileData = await profileRes.json();
 				
 				const p = self.gameState.players[pId];
+				if (p) {
+					p.profileStats = profileData;
+				}
 				if (p && profileData.classes && profileData.classes[charId]) {
 					const c = profileData.classes[charId];
 					p.level = c.level;
@@ -965,9 +1052,7 @@ export class GameRoom {
 		});
 
 		if (this.sessions.length === 2) {
-			this.gameState.status = 'IN_PROGRESS';
-			this.gameState.turn = 0;
-			this.startTurnTimer();
+			this.startHeroSelectPhase();
 		}
 
 		this.broadcastState();
@@ -986,6 +1071,29 @@ export class GameRoom {
 		
 		try {
 			const data = JSON.parse(msg);
+
+			if ((data.action === 'hero_select_pick' || data.action === 'hero_select_ready') && this.gameState.status === 'HERO_SELECT') {
+				if (!this.gameState.heroSelect || !this.gameState.heroSelect.players[playerId]) return;
+				const row = this.gameState.heroSelect.players[playerId];
+				if (data.action === 'hero_select_pick') {
+					if (data.charId) row.charId = data.charId;
+					if (data.skin) row.skin = data.skin;
+					row.ready = false;
+					this.broadcastHeroSelectUpdate();
+					return;
+				}
+				if (data.action === 'hero_select_ready') {
+					if (data.charId) row.charId = data.charId;
+					if (data.skin) row.skin = data.skin;
+					row.ready = true;
+					this.broadcastHeroSelectUpdate();
+					const bothReady = this.gameState.heroSelect.players.p1.ready && this.gameState.heroSelect.players.p2.ready;
+					if (bothReady) {
+						this.finalizeHeroSelectAndStartBattle();
+					}
+					return;
+				}
+			}
 
 			// Emotes can be sent at any time during a match
 			if (data.action === 'emote' && this.gameState.status === 'IN_PROGRESS') {
@@ -1039,21 +1147,7 @@ export class GameRoom {
 						if (p) delete p.postGame;
 					}
 
-					for (const pId of ['p1', 'p2']) {
-						const p = this.gameState.players[pId];
-						const classData = this.getClassData(p.classId);
-						const hpBonus = (p.level - 1) * 10;
-						p.maxHealth = classData.hp + hpBonus;
-						p.health = p.maxHealth;
-						p.abilities = classData.abilities.map(a => ({...a}));
-						p.shield = { active: false, percent: 0 };
-						p.dodge = false;
-					}
-
-					this.gameState.status = 'IN_PROGRESS';
-					this.gameState.turn = 0;
-					this.startTurnTimer();
-					this.broadcastState();
+					this.startHeroSelectPhase();
 				} else {
 					const statusMsg = JSON.stringify({ type: 'REMATCH_VOTE', pId: playerId, choice });
 					this.sessions.forEach(s => { try { s.ws.send(statusMsg); } catch(e) {} });
@@ -1194,8 +1288,13 @@ export class GameRoom {
 	async webSocketClose(ws, code, reason, wasClean) {
 		try {
 			this.sessions = this.sessions.filter(s => s.ws !== ws);
+			if (this.heroSelectTimer) {
+				clearTimeout(this.heroSelectTimer);
+				this.heroSelectTimer = null;
+			}
 			this.gameState.status = 'WAITING_FOR_PLAYERS';
 			this.gameState.players = {};
+			delete this.gameState.heroSelect;
 			this.gameState.series = null;
 			this.rematchVotes.clear();
 			this.rematchModes.clear();

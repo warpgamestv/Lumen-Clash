@@ -1,4 +1,29 @@
-y# Lumen Clash
+# Lumen Clash
+
+## v1.5.0 — Pre-match hero select (2026-03-27)
+### Added
+- **`HERO_SELECT` match phase** in `GameRoom`: after two players connect, the room enters hero select (`gameState.status === 'HERO_SELECT'`, `gameState.heroSelect` with deadline and per-player `charId` / `skin` / `ready`).
+- **WebSocket actions**: `hero_select_pick`, `hero_select_ready`; broadcast **`HERO_SELECT_UPDATE`** for live UI sync.
+- **Timeout**: 20 seconds then auto-lock and **`finalizeHeroSelectAndStartBattle()`** (applies chosen class/skin and profile level bonuses).
+- **`profileStats`** cached on player objects so finalized stats use the correct per-class level after a class change at lock-in.
+- **Rematch / Bo3**: When both players agree to rematch, **`startHeroSelectPhase()`** runs instead of jumping straight to **`IN_PROGRESS`** (series metadata preserved).
+
+### Changed
+- **Frontend** (`frontend/`): hero select overlay, presence + reconnect during **`HERO_SELECT`**, shared **`availableSkinsForChar`** for roster preview and hero select.
+
+## v1.4.0 — Luminary Pass premium UX & profile titles (2026-03-26)
+### Added
+- **Luminary Pass refresh**: Full-screen **glass / neon** layout aligned with other Lumen menus; clearer rank header and horizontal reward track.
+- **Lumens & Premium unlock (client)**: Free-track **Lumens (💠)** milestones and a **progress meter** toward unlocking **Premium** from play (persisted in `localStorage` as `lumen_clash_bp_premium_unlocked` once eligibility is met).
+- **Profile → Display title**: Equip **unlocked titles** from the Player Profile screen (with hint text); **Save** persists via the same **`/save-customization`** API used for skins.
+- **More pass rewards**: New **Knight/Sage skins** (**Crimson Knight** and **Astral Sage**) plus additional **rank titles** on the Luminary Pass track—for example **Recruit**, **Tactician**, **Arc Warden**, **Starforged**, **Mythbreaker**, **Season Vanguard**, and **Paragon**, alongside existing emote, skin, and credit nodes. _(Ensure your backend grants `unlockedTitles` entries that match these display names when players reach the corresponding ranks.)_
+- **Void Weaver — Abyssal & Lumen Legend**: Dedicated textures (`void_weaver_abyssal.png`, `void_weaver_legend.png`) are loaded and swapped like **Verdant**; menu/battle scale compensates when variant PNG resolution differs from the base sprite.
+
+### Changed
+- **Character Customize**: **Skin variant** only in the roster preview modal; **titles** moved to **Profile** so progression and identity are centralized.
+
+### Notes
+- **Backend parity**: If titles do not appear after ranking up, update server logic so rank-ups add the new title strings to **`unlockedTitles`** to match the client pass table.
 
 ## v1.3.0 — Menu readability & social polish (2026-03-22)
 ### Added
