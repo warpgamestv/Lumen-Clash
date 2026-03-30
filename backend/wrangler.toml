@@ -1,4 +1,4 @@
-﻿name = "lumen-clash-backend"
+name = "lumen-clash-backend"
 main = "src/index.js"
 compatibility_date = "2024-03-20"
 compatibility_flags = ["nodejs_compat"]
@@ -25,6 +25,7 @@ routes = [
   { pattern = "warpgamestv.com/friend-duel-accept*", zone_name = "warpgamestv.com" },
   { pattern = "warpgamestv.com/report*", zone_name = "warpgamestv.com" },
   { pattern = "warpgamestv.com/unlock-premium*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/admin/*", zone_name = "warpgamestv.com" },
   { pattern = "www.warpgamestv.com/play*", zone_name = "warpgamestv.com" },
   { pattern = "www.warpgamestv.com/profile*", zone_name = "warpgamestv.com" },
   { pattern = "www.warpgamestv.com/set-username*", zone_name = "warpgamestv.com" },
@@ -45,7 +46,8 @@ routes = [
   { pattern = "www.warpgamestv.com/friend-duel-decline*", zone_name = "warpgamestv.com" },
   { pattern = "www.warpgamestv.com/friend-duel-accept*", zone_name = "warpgamestv.com" },
   { pattern = "www.warpgamestv.com/report*", zone_name = "warpgamestv.com" },
-  { pattern = "www.warpgamestv.com/unlock-premium*", zone_name = "warpgamestv.com" }
+  { pattern = "www.warpgamestv.com/unlock-premium*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/admin/*", zone_name = "warpgamestv.com" }
 ]
 
 [[migrations]]

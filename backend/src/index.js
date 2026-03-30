@@ -33,6 +33,55 @@ function isRateLimited(key, limit, windowMs) {
 	return false;
 }
 
+
+function getAdminReportsSecret(env) {
+	const s = env.ADMIN_REPORTS_SECRET;
+	return typeof s === 'string' && s.length >= 16 ? s : null;
+}
+
+function adminSecretFromRequest(request) {
+	const h = request.headers.get('X-Admin-Secret');
+	if (h && h.trim()) return h.trim();
+	const auth = request.headers.get('Authorization') || '';
+	const m = auth.match(/^Bearer\s+(.+)$/i);
+	if (m) return m[1].trim();
+	return null;
+}
+
+function escapeHtml(str) {
+	return String(str)
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;');
+}
+
+function renderReportsAdminPage(reports, errorMsg) {
+	const rows = [...(reports || [])]
+		.slice()
+		.reverse()
+		.map((r) => {
+			const t = r.ts ? new Date(r.ts).toISOString() : '';
+			return `<tr><td>${escapeHtml(t)}</td><td>${escapeHtml(r.category || '')}</td><td>${escapeHtml(
+				r.reporterUid || ''
+			)}</td><td>${escapeHtml(r.reportedUid || '')}</td><td>${escapeHtml(r.roomId || '')}</td><td>${escapeHtml(
+				r.clientVersion || ''
+			)}</td><td class="details">${escapeHtml(r.details || '')}</td></tr>`;
+		})
+		.join('');
+	const err = errorMsg ? `<p class="err">${escapeHtml(errorMsg)}</p>` : '';
+	return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Lumen Clash reports</title>
+<style>body{font-family:system-ui,sans-serif;background:#0f0524;color:#e8e6ff;margin:16px}h1{font-size:1.2rem}
+.err{color:#f88}form{margin:12px 0}input[type=password]{width:min(480px,100%);padding:8px}.meta{color:#889;font-size:.85rem}
+table{border-collapse:collapse;width:100%;font-size:.9rem}th,td{border:1px solid #334;padding:6px 8px;text-align:left}
+th{background:#1a0f38}.details{max-width:400px;word-break:break-word;white-space:pre-wrap}</style></head><body>
+<h1>Player reports</h1><p class="meta">Newest first. Up to 500 rows kept.</p>
+${err}
+<form method="post" action="/admin/reports"><label>Admin secret <input type="password" name="secret" autocomplete="current-password" required></label> <button type="submit">Load reports</button></form>
+<table><thead><tr><th>Time UTC</th><th>Category</th><th>Reporter UID</th><th>Reported UID</th><th>Room</th><th>Client</th><th>Details</th></tr></thead><tbody>${rows ||
+		'<tr><td colspan="7">No reports yet.</td></tr>'}</tbody></table></body></html>`;
+}
+
 export default {
 	async fetch(request, env, ctx) {
 		const url = new URL(request.url);
@@ -330,6 +379,67 @@ export default {
 			let mmId = env.MATCHMAKER.idFromName('global-matchmaker');
 			return env.MATCHMAKER.get(mmId).fetch(new Request(`http://internal/join-private?code=${code}`));
 		}
+
+		if (url.pathname === '/admin/reports') {
+			const configured = getAdminReportsSecret(env);
+			if (!configured) {
+				return new Response(
+					renderReportsAdminPage([], 'ADMIN_REPORTS_SECRET is not configured — run: wrangler secret put ADMIN_REPORTS_SECRET'),
+					{ status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+				);
+			}
+			if (request.method === 'GET') {
+				return new Response(renderReportsAdminPage([]), {
+					headers: { 'Content-Type': 'text/html; charset=utf-8' }
+				});
+			}
+			if (request.method === 'POST') {
+				const clientIp = request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || 'unknown';
+				if (isRateLimited(`admin-reports:${clientIp}`, 30, 60_000)) {
+					return new Response(renderReportsAdminPage([], 'Too many attempts. Try again in a minute.'), {
+						status: 429,
+						headers: { 'Content-Type': 'text/html; charset=utf-8' }
+					});
+				}
+				let secretInput = adminSecretFromRequest(request);
+				if (!secretInput) {
+					try {
+						const ct = (request.headers.get('Content-Type') || '').toLowerCase();
+						if (ct.includes('application/json')) {
+							const j = await request.json();
+							secretInput = (j && j.secret) || '';
+						} else {
+							const form = await request.formData();
+							secretInput = form.get('secret') || '';
+						}
+					} catch (e) {
+						secretInput = '';
+					}
+				}
+				if (!secretInput || secretInput !== configured) {
+					return new Response(renderReportsAdminPage([], 'Invalid secret.'), {
+						status: 401,
+						headers: { 'Content-Type': 'text/html; charset=utf-8' }
+					});
+				}
+				try {
+					const hub = env.MODERATION_HUB.get(env.MODERATION_HUB.idFromName('global'));
+					const listRes = await hub.fetch(new Request('http://internal/list'));
+					const data = await listRes.json();
+					const reports = data.reports || [];
+					return new Response(renderReportsAdminPage(reports), {
+						headers: { 'Content-Type': 'text/html; charset=utf-8' }
+					});
+				} catch (e) {
+					return new Response(renderReportsAdminPage([], 'Could not load reports.'), {
+						status: 500,
+						headers: { 'Content-Type': 'text/html; charset=utf-8' }
+					});
+				}
+			}
+			return new Response('Method not allowed', { status: 405 });
+		}
+
 		if (url.pathname === '/report') {
 			if (request.method === 'OPTIONS') {
 				return new Response(null, {
@@ -1685,6 +1795,16 @@ export class ModerationHub {
 				return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
 			} catch (e) {
 				return new Response(JSON.stringify({ ok: false }), { status: 500, headers: { "Content-Type": "application/json" } });
+			}
+		}
+		if (url.pathname === "/list" && request.method === "GET") {
+			try {
+				const list = (await this.state.storage.get("reports")) || [];
+				return new Response(JSON.stringify({ ok: true, reports: list }), {
+					headers: { "Content-Type": "application/json" }
+				});
+			} catch (e) {
+				return new Response(JSON.stringify({ ok: false, reports: [] }), { status: 500, headers: { "Content-Type": "application/json" } });
 			}
 		}
 		return new Response("Not found", { status: 404 });
