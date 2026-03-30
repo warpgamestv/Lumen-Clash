@@ -48,6 +48,12 @@ function adminSecretFromRequest(request) {
 	return null;
 }
 
+
+/** Admin HTML is not static assets; avoid stale UI after deploys. */
+const ADMIN_HTML_HEADERS = {
+	'Content-Type': 'text/html; charset=utf-8',
+	'Cache-Control': 'no-store, no-cache, must-revalidate'
+};
 function escapeHtml(str) {
 	return String(str)
 		.replace(/&/g, '&amp;')
@@ -573,12 +579,12 @@ export default {
 					renderReportsAdminPage([], {}, {
 						errorMsg: 'ADMIN_REPORTS_SECRET is not configured — run: wrangler secret put ADMIN_REPORTS_SECRET'
 					}),
-					{ status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+					{ status: 503, headers: ADMIN_HTML_HEADERS }
 				);
 			}
 			if (request.method === 'GET') {
 				return new Response(renderReportsAdminPage([], {}, {}), {
-					headers: { 'Content-Type': 'text/html; charset=utf-8' }
+					headers: ADMIN_HTML_HEADERS
 				});
 			}
 			if (request.method === 'POST') {
@@ -586,7 +592,7 @@ export default {
 				if (isRateLimited(`admin-reports:${clientIp}`, 30, 60_000)) {
 					return new Response(renderReportsAdminPage([], {}, { errorMsg: 'Too many attempts. Try again in a minute.' }), {
 						status: 429,
-						headers: { 'Content-Type': 'text/html; charset=utf-8' }
+						headers: ADMIN_HTML_HEADERS
 					});
 				}
 				let secretInput = adminSecretFromRequest(request);
@@ -607,7 +613,7 @@ export default {
 				if (!secretInput || secretInput !== configured) {
 					return new Response(renderReportsAdminPage([], {}, { errorMsg: 'Invalid secret.' }), {
 						status: 401,
-						headers: { 'Content-Type': 'text/html; charset=utf-8' }
+						headers: ADMIN_HTML_HEADERS
 					});
 				}
 				try {
@@ -617,12 +623,12 @@ export default {
 					const reports = data.reports || [];
 					const nameByUid = await resolveReportPlayerNames(env, reports);
 					return new Response(renderReportsAdminPage(reports, nameByUid, { embeddedSecret: secretInput }), {
-						headers: { 'Content-Type': 'text/html; charset=utf-8' }
+						headers: ADMIN_HTML_HEADERS
 					});
 				} catch (e) {
 					return new Response(renderReportsAdminPage([], {}, { errorMsg: 'Could not load reports.' }), {
 						status: 500,
-						headers: { 'Content-Type': 'text/html; charset=utf-8' }
+						headers: ADMIN_HTML_HEADERS
 					});
 				}
 			}
@@ -634,7 +640,7 @@ export default {
 			if (!configured) {
 				return new Response(
 					renderReportsAdminPage([], {}, { errorMsg: 'ADMIN_REPORTS_SECRET is not configured.' }),
-					{ status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+					{ status: 503, headers: ADMIN_HTML_HEADERS }
 				);
 			}
 			if (request.method !== 'POST') {
@@ -644,14 +650,14 @@ export default {
 			if (isRateLimited(`admin-moderate:${clientIp}`, 40, 60_000)) {
 				return new Response(renderReportsAdminPage([], {}, { errorMsg: 'Too many moderation attempts. Wait a minute.' }), {
 					status: 429,
-					headers: { 'Content-Type': 'text/html; charset=utf-8' }
+					headers: ADMIN_HTML_HEADERS
 				});
 			}
 			const okSecret = await parseAdminSecretBody(request.clone(), configured);
 			if (!okSecret) {
 				return new Response(renderReportsAdminPage([], {}, { errorMsg: 'Invalid secret.' }), {
 					status: 401,
-					headers: { 'Content-Type': 'text/html; charset=utf-8' }
+					headers: ADMIN_HTML_HEADERS
 				});
 			}
 			let action = '';
@@ -717,12 +723,12 @@ export default {
 						successMsg: successMsg || undefined,
 						errorMsg: errFlash || undefined
 					}),
-					{ status, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+					{ status, headers: ADMIN_HTML_HEADERS }
 				);
 			} catch (e) {
 				return new Response(
 					renderReportsAdminPage([], {}, { embeddedSecret: okSecret, errorMsg: errFlash || 'Could not reload list.' }),
-					{ status: 500, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+					{ status: 500, headers: ADMIN_HTML_HEADERS }
 				);
 			}
 		}
