@@ -56,30 +56,216 @@ function escapeHtml(str) {
 		.replace(/"/g, '&quot;');
 }
 
-function renderReportsAdminPage(reports, errorMsg) {
-	const rows = [...(reports || [])]
-		.slice()
-		.reverse()
+function escapeAttr(str) {
+	return escapeHtml(str).replace(/'/g, '&#39;');
+}
+
+async function parseAdminSecretBody(request, configured) {
+	let secretInput = adminSecretFromRequest(request);
+	if (secretInput && secretInput === configured) return secretInput;
+	try {
+		const ct = (request.headers.get('Content-Type') || '').toLowerCase();
+		if (ct.includes('application/json')) {
+			const j = await request.json();
+			secretInput = (j && j.secret) || '';
+		} else {
+			const form = await request.formData();
+			secretInput = (form.get('secret') && String(form.get('secret'))) || '';
+		}
+	} catch (e) {
+		secretInput = '';
+	}
+	return secretInput === configured ? secretInput : null;
+}
+
+async function lookupUsernameForUid(env, uid) {
+	if (!uid) return null;
+	const reg = env.USERNAME_REGISTRY.get(env.USERNAME_REGISTRY.idFromName('global'));
+	const res = await reg.fetch(new Request(`http://internal/lookup-name?uid=${encodeURIComponent(uid)}`));
+	if (!res.ok) return null;
+	const data = await res.json();
+	return data.username || null;
+}
+
+async function resolveReportPlayerNames(env, reports) {
+	const uids = new Set();
+	for (const r of reports || []) {
+		if (r.reporterUid) uids.add(r.reporterUid);
+		if (r.reportedUid) uids.add(r.reportedUid);
+	}
+	const entries = await Promise.all(
+		[...uids].map(async (uid) => [uid, await lookupUsernameForUid(env, uid)])
+	);
+	return Object.fromEntries(entries);
+}
+
+async function removePlayerFromLeaderboard(env, uid) {
+	const lb = env.LEADERBOARD.get(env.LEADERBOARD.idFromName('global'));
+	await lb.fetch(
+		new Request('http://internal/remove-uid', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ uid })
+		})
+	);
+}
+
+async function performResetPlayer(env, uid) {
+	if (!uid) return;
+	const p = env.PLAYER_PROFILE.get(env.PLAYER_PROFILE.idFromName(uid));
+	const pRes = await p.fetch(new Request('http://internal/get-stats'));
+	const pData = await pRes.json();
+
+	if (pData.username) {
+		const reg = env.USERNAME_REGISTRY.get(env.USERNAME_REGISTRY.idFromName('global'));
+		await reg.fetch(new Request(`http://internal/release?uid=${encodeURIComponent(uid)}&name=${encodeURIComponent(pData.username)}`));
+	}
+
+	await p.fetch(new Request('http://internal/wipe'));
+	await removePlayerFromLeaderboard(env, uid);
+}
+
+function renderReportsAdminPage(reports, nameByUid, opts = {}) {
+	const errorMsg = opts.errorMsg || '';
+	const successMsg = opts.successMsg || '';
+	const embeddedSecret = opts.embeddedSecret || '';
+
+	const rev = [...(reports || [])].slice().reverse();
+	const categories = [...new Set(rev.map((r) => String(r.category || 'other')).filter(Boolean))].sort();
+
+	const rowsHtml = rev
 		.map((r) => {
 			const t = r.ts ? new Date(r.ts).toISOString() : '';
-			return `<tr><td>${escapeHtml(t)}</td><td>${escapeHtml(r.category || '')}</td><td>${escapeHtml(
-				r.reporterUid || ''
-			)}</td><td>${escapeHtml(r.reportedUid || '')}</td><td>${escapeHtml(r.roomId || '')}</td><td>${escapeHtml(
-				r.clientVersion || ''
-			)}</td><td class="details">${escapeHtml(r.details || '')}</td></tr>`;
+			const cat = String(r.category || 'other');
+			const repUid = r.reporterUid || '';
+			const reportedUid = r.reportedUid || '';
+			const repName = (repUid && nameByUid[repUid]) || '—';
+			const reportedName = (reportedUid && nameByUid[reportedUid]) || '—';
+			const room = r.roomId || '';
+			const cli = r.clientVersion || '';
+			const details = r.details || '';
+			const searchBlob = [t, cat, repUid, repName, reportedUid, reportedName, room, cli, details].join(' ').toLowerCase();
+
+			const dismissForm =
+				embeddedSecret && r.ts != null
+					? `<form method="post" action="/admin/moderate" class="inline-form" onsubmit="return confirm('Remove this report from the queue?');"><input type="hidden" name="secret" value="${escapeAttr(
+							embeddedSecret
+					  )}"><input type="hidden" name="action" value="dismiss_report"><input type="hidden" name="ts" value="${escapeAttr(
+							String(r.ts)
+					  )}"><input type="hidden" name="reporterUid" value="${escapeAttr(repUid)}"><input type="hidden" name="reportedUid" value="${escapeAttr(
+							reportedUid
+					  )}"><button type="submit" class="btn btn-muted">Dismiss</button></form>`
+					: '—';
+
+			const resetReportedForm =
+				embeddedSecret && reportedUid
+					? `<form method="post" action="/admin/moderate" class="inline-form" onsubmit="return confirm('Wipe this reported account (progress, username, leaderboard)?');"><input type="hidden" name="secret" value="${escapeAttr(
+							embeddedSecret
+					  )}"><input type="hidden" name="action" value="reset_player"><input type="hidden" name="targetUid" value="${escapeAttr(
+							reportedUid
+					  )}"><button type="submit" class="btn btn-danger">Reset reported</button></form>`
+					: '—';
+
+			const resetReporterForm =
+				embeddedSecret && repUid
+					? `<form method="post" action="/admin/moderate" class="inline-form" onsubmit="return confirm('Wipe the reporter account?');"><input type="hidden" name="secret" value="${escapeAttr(
+							embeddedSecret
+					  )}"><input type="hidden" name="action" value="reset_player"><input type="hidden" name="targetUid" value="${escapeAttr(
+							repUid
+					  )}"><button type="submit" class="btn btn-warn">Reset reporter</button></form>`
+					: '—';
+
+			return `<tr data-cat="${escapeAttr(cat)}" data-search="${escapeAttr(searchBlob)}"><td class="nowrap mono">${escapeHtml(
+				t
+			)}</td><td><span class="pill">${escapeHtml(cat)}</span></td><td class="player-cell"><span class="mono sm">${escapeHtml(
+				repUid
+			)}</span><span class="un">${escapeHtml(repName)}</span></td><td class="player-cell"><span class="mono sm">${escapeHtml(
+				reportedUid
+			)}</span><span class="un">${escapeHtml(reportedName)}</span></td><td class="mono sm">${escapeHtml(room)}</td><td class="mono sm">${escapeHtml(
+				cli
+			)}</td><td class="details">${escapeHtml(details)}</td><td class="actions">${resetReportedForm}${resetReporterForm}${dismissForm}</td></tr>`;
 		})
 		.join('');
-	const err = errorMsg ? `<p class="err">${escapeHtml(errorMsg)}</p>` : '';
-	return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Lumen Clash reports</title>
-<style>body{font-family:system-ui,sans-serif;background:#0f0524;color:#e8e6ff;margin:16px}h1{font-size:1.2rem}
-.err{color:#f88}form{margin:12px 0}input[type=password]{width:min(480px,100%);padding:8px}.meta{color:#889;font-size:.85rem}
-table{border-collapse:collapse;width:100%;font-size:.9rem}th,td{border:1px solid #334;padding:6px 8px;text-align:left}
-th{background:#1a0f38}.details{max-width:400px;word-break:break-word;white-space:pre-wrap}</style></head><body>
-<h1>Player reports</h1><p class="meta">Newest first. Up to 500 rows kept.</p>
-${err}
-<form method="post" action="/admin/reports"><label>Admin secret <input type="password" name="secret" autocomplete="current-password" required></label> <button type="submit">Load reports</button></form>
-<table><thead><tr><th>Time UTC</th><th>Category</th><th>Reporter UID</th><th>Reported UID</th><th>Room</th><th>Client</th><th>Details</th></tr></thead><tbody>${rows ||
-		'<tr><td colspan="7">No reports yet.</td></tr>'}</tbody></table></body></html>`;
+
+	const catOptions =
+		`<option value="">All categories</option>` +
+		categories.map((c) => `<option value="${escapeAttr(c)}">${escapeHtml(c)}</option>`).join('');
+
+	const errBlock = errorMsg ? `<div class="banner banner-err">${escapeHtml(errorMsg)}</div>` : '';
+	const okBlock = successMsg ? `<div class="banner banner-ok">${escapeHtml(successMsg)}</div>` : '';
+
+	const toolbar = embeddedSecret
+		? `<div class="toolbar"><label class="grow"><span class="lbl">Search</span><input type="search" id="filterQ" placeholder="UID, name, room, details" autocomplete="off"></label><label><span class="lbl">Category</span><select id="filterCat">${catOptions}</select></label><span class="row-count mono" id="rowCount"></span></div>`
+		: '';
+
+	const loginForm = !embeddedSecret
+		? `<form method="post" action="/admin/reports" class="login card"><h2>Sign in</h2><p class="hint">Enter your admin secret to load and moderate reports.</p><label class="block"><span class="lbl">Admin secret</span><input type="password" name="secret" autocomplete="current-password" required></label><button type="submit" class="btn btn-primary">Load reports</button></form>`
+		: `<form method="post" action="/admin/reports" class="inline row card thin"><input type="hidden" name="secret" value="${escapeAttr(
+				embeddedSecret
+		  )}"><button type="submit" class="btn btn-muted">Refresh list</button></form>`;
+
+	return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lumen Clash - Moderation</title>
+<style>
+:root{--bg0:#07051a;--bg1:#120b2e;--card:#151032e6;--stroke:#3d2f6b;--text:#ede9ff;--muted:#9b8fb8;--accent:#a78bfa;--accent2:#22d3ee;--danger:#f87171;--warn:#fbbf24;--ok:#34d399;--radius:12px;font-family:"Segoe UI",system-ui,-apple-system,sans-serif}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;color:var(--text);background:radial-gradient(1200px 800px at 10% -10%,#2e1f5c 0%,transparent 50%),radial-gradient(900px 600px at 90% 30%,#0c3d4d 0%,transparent 45%),linear-gradient(165deg,var(--bg0),var(--bg1))}
+.wrap{max-width:1280px;margin:0 auto;padding:28px 20px 48px}header{margin-bottom:20px}
+header h1{font-size:1.65rem;font-weight:700;letter-spacing:-.02em;margin:0 0 6px;background:linear-gradient(90deg,var(--text),var(--accent));-webkit-background-clip:text;background-clip:text;color:transparent}
+.sub{color:var(--muted);font-size:.95rem;margin:0}
+.card{background:var(--card);border:1px solid var(--stroke);border-radius:var(--radius);padding:20px 22px;backdrop-filter:blur(10px);box-shadow:0 16px 50px rgba(0,0,0,.35)}
+.card.thin{padding:12px 16px;margin-bottom:16px}
+.login{max-width:420px;margin-bottom:24px}.login h2{margin:0 0 8px;font-size:1.1rem}
+.hint{color:var(--muted);font-size:.9rem;margin:0 0 16px}.block{display:block;margin-bottom:14px}
+.lbl{display:block;font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px}
+input[type=password],input[type=search],select{width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--stroke);background:rgba(0,0,0,.25);color:var(--text);font-size:.95rem}
+select{cursor:pointer;max-width:220px}
+.toolbar{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-bottom:16px;padding:14px 16px;background:var(--card);border:1px solid var(--stroke);border-radius:var(--radius)}
+.toolbar .grow{flex:1;min-width:200px}.row-count{color:var(--muted);font-size:.85rem;align-self:center}
+.banner{padding:12px 16px;border-radius:10px;margin-bottom:16px;font-size:.95rem}
+.banner-err{background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.35);color:#fecaca}
+.banner-ok{background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.35);color:#a7f3d0}
+.table-wrap{overflow:auto;border-radius:var(--radius);border:1px solid var(--stroke);background:rgba(10,6,28,.65)}
+table{width:100%;border-collapse:collapse;font-size:.88rem;min-width:920px}
+thead th{text-align:left;padding:12px 10px;background:rgba(87,67,148,.35);font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--stroke);position:sticky;top:0;z-index:1}
+tbody td{padding:10px;border-bottom:1px solid rgba(61,47,107,.45);vertical-align:top}
+tbody tr:hover{background:rgba(167,139,250,.06)}.nowrap{white-space:nowrap}
+.mono{font-family:ui-monospace,monospace;font-size:.82em}.sm{font-size:.78rem;opacity:.85;display:block}
+.player-cell .un{display:block;font-weight:600;margin-top:2px;color:#e4dfff}
+.pill{display:inline-block;padding:3px 10px;border-radius:999px;background:rgba(34,211,238,.12);color:var(--accent2);font-size:.8rem;font-weight:600}
+.details{max-width:340px;word-break:break-word;white-space:pre-wrap;color:#d8d1f0;line-height:1.35}
+.actions{min-width:200px}.inline-form{margin:0 0 8px}.inline-form:last-child{margin-bottom:0}
+.btn{display:inline-block;padding:8px 12px;border-radius:8px;border:1px solid transparent;font-size:.82rem;font-weight:600;cursor:pointer;width:100%;transition:transform .05s,filter .15s}
+.btn:active{transform:scale(.98)}.btn-primary{background:linear-gradient(135deg,var(--accent),#7c3aed);color:#fff}.btn-primary:hover{filter:brightness(1.08)}
+.btn-muted{background:rgba(255,255,255,.08);color:var(--text);border-color:var(--stroke)}.btn-muted:hover{background:rgba(255,255,255,.12)}
+.btn-danger{background:rgba(248,113,113,.2);color:#fecaca;border-color:rgba(248,113,113,.4)}.btn-danger:hover{background:rgba(248,113,113,.3)}
+.btn-warn{background:rgba(251,191,36,.15);color:#fde68a;border-color:rgba(251,191,36,.35)}.btn-warn:hover{background:rgba(251,191,36,.25)}
+.row{display:flex;align-items:center;gap:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><h1>Moderation desk</h1><p class="sub">Player reports - Newest first - Up to 500 stored</p></header>
+${errBlock}${okBlock}
+${loginForm}
+${toolbar}
+<div class="table-wrap">
+<table id="reportTable">
+<thead><tr>
+<th>Time (UTC)</th><th>Category</th><th>Reporter</th><th>Reported</th><th>Room</th><th>Client</th><th>Details</th><th>Actions</th>
+</tr></thead>
+<tbody>${rowsHtml || '<tr><td colspan="8">No reports yet.</td></tr>'}</tbody>
+</table>
+</div>
+</div>
+<script>
+(function(){var q=document.getElementById("filterQ");var cat=document.getElementById("filterCat");var tbl=document.getElementById("reportTable");if(!q||!tbl)return;var rows=[].slice.call(tbl.querySelectorAll("tbody tr"));var rc=document.getElementById("rowCount");function apply(){var cq=(q.value||"").toLowerCase();var cc=cat?cat.value:"";var vis=0;var total=0;rows.forEach(function(tr){var tds=tr.querySelectorAll("td");if(tds.length===1&&tds[0].hasAttribute("colspan")){tr.style.display="";return;}total++;var blob=(tr.getAttribute("data-search")||"").toLowerCase();var c=tr.getAttribute("data-cat")||"";var okQ=!cq||blob.indexOf(cq)!==-1;var okC=!cc||c===cc;var show=okQ&&okC;tr.style.display=show?"":"none";if(show)vis++;});if(rc)rc.textContent=vis+" / "+total+" rows";}q.addEventListener("input",apply);if(cat)cat.addEventListener("change",apply);apply();})();
+</script>
+</body>
+</html>`;
 }
 
 export default {
@@ -384,19 +570,21 @@ export default {
 			const configured = getAdminReportsSecret(env);
 			if (!configured) {
 				return new Response(
-					renderReportsAdminPage([], 'ADMIN_REPORTS_SECRET is not configured — run: wrangler secret put ADMIN_REPORTS_SECRET'),
+					renderReportsAdminPage([], {}, {
+						errorMsg: 'ADMIN_REPORTS_SECRET is not configured — run: wrangler secret put ADMIN_REPORTS_SECRET'
+					}),
 					{ status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
 				);
 			}
 			if (request.method === 'GET') {
-				return new Response(renderReportsAdminPage([]), {
+				return new Response(renderReportsAdminPage([], {}, {}), {
 					headers: { 'Content-Type': 'text/html; charset=utf-8' }
 				});
 			}
 			if (request.method === 'POST') {
 				const clientIp = request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || 'unknown';
 				if (isRateLimited(`admin-reports:${clientIp}`, 30, 60_000)) {
-					return new Response(renderReportsAdminPage([], 'Too many attempts. Try again in a minute.'), {
+					return new Response(renderReportsAdminPage([], {}, { errorMsg: 'Too many attempts. Try again in a minute.' }), {
 						status: 429,
 						headers: { 'Content-Type': 'text/html; charset=utf-8' }
 					});
@@ -417,7 +605,7 @@ export default {
 					}
 				}
 				if (!secretInput || secretInput !== configured) {
-					return new Response(renderReportsAdminPage([], 'Invalid secret.'), {
+					return new Response(renderReportsAdminPage([], {}, { errorMsg: 'Invalid secret.' }), {
 						status: 401,
 						headers: { 'Content-Type': 'text/html; charset=utf-8' }
 					});
@@ -427,17 +615,116 @@ export default {
 					const listRes = await hub.fetch(new Request('http://internal/list'));
 					const data = await listRes.json();
 					const reports = data.reports || [];
-					return new Response(renderReportsAdminPage(reports), {
+					const nameByUid = await resolveReportPlayerNames(env, reports);
+					return new Response(renderReportsAdminPage(reports, nameByUid, { embeddedSecret: secretInput }), {
 						headers: { 'Content-Type': 'text/html; charset=utf-8' }
 					});
 				} catch (e) {
-					return new Response(renderReportsAdminPage([], 'Could not load reports.'), {
+					return new Response(renderReportsAdminPage([], {}, { errorMsg: 'Could not load reports.' }), {
 						status: 500,
 						headers: { 'Content-Type': 'text/html; charset=utf-8' }
 					});
 				}
 			}
 			return new Response('Method not allowed', { status: 405 });
+		}
+
+		if (url.pathname === '/admin/moderate') {
+			const configured = getAdminReportsSecret(env);
+			if (!configured) {
+				return new Response(
+					renderReportsAdminPage([], {}, { errorMsg: 'ADMIN_REPORTS_SECRET is not configured.' }),
+					{ status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+				);
+			}
+			if (request.method !== 'POST') {
+				return new Response('Method not allowed', { status: 405 });
+			}
+			const clientIp = request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || 'unknown';
+			if (isRateLimited(`admin-moderate:${clientIp}`, 40, 60_000)) {
+				return new Response(renderReportsAdminPage([], {}, { errorMsg: 'Too many moderation attempts. Wait a minute.' }), {
+					status: 429,
+					headers: { 'Content-Type': 'text/html; charset=utf-8' }
+				});
+			}
+			const okSecret = await parseAdminSecretBody(request.clone(), configured);
+			if (!okSecret) {
+				return new Response(renderReportsAdminPage([], {}, { errorMsg: 'Invalid secret.' }), {
+					status: 401,
+					headers: { 'Content-Type': 'text/html; charset=utf-8' }
+				});
+			}
+			let action = '';
+			let targetUid = '';
+			let ts = null;
+			let reporterUid = '';
+			let reportedUid = '';
+			try {
+				const ct = (request.headers.get('Content-Type') || '').toLowerCase();
+				if (ct.includes('application/json')) {
+					const j = await request.json();
+					action = String(j.action || '');
+					targetUid = String(j.targetUid || '').trim();
+					ts = j.ts != null ? Number(j.ts) : null;
+					reporterUid = String(j.reporterUid || '');
+					reportedUid = String(j.reportedUid || '');
+				} else {
+					const form = await request.formData();
+					action = String(form.get('action') || '');
+					targetUid = String(form.get('targetUid') || '').trim();
+					const tss = form.get('ts');
+					ts = tss != null && tss !== '' ? Number(tss) : null;
+					reporterUid = String(form.get('reporterUid') || '');
+					reportedUid = String(form.get('reportedUid') || '');
+				}
+			} catch (e) {
+				action = '';
+			}
+			let successMsg = '';
+			let errFlash = '';
+			try {
+				if (action === 'reset_player' && targetUid) {
+					await performResetPlayer(env, targetUid);
+					successMsg = `Account reset completed for UID ${targetUid}.`;
+				} else if (action === 'dismiss_report' && ts != null && !Number.isNaN(ts)) {
+					const hub = env.MODERATION_HUB.get(env.MODERATION_HUB.idFromName('global'));
+					const rm = await hub.fetch(
+						new Request('http://internal/remove-report', {
+							method: 'POST',
+							headers: { 'Content-Type': 'application/json' },
+							body: JSON.stringify({ ts, reporterUid, reportedUid })
+						})
+					);
+					const dj = await rm.json();
+					if (dj.ok && dj.removed > 0) successMsg = 'Report dismissed.';
+					else errFlash = 'No matching report to dismiss (already removed?).';
+				} else {
+					errFlash = 'Unknown or incomplete action.';
+				}
+			} catch (e) {
+				errFlash = 'Moderation action failed.';
+			}
+			try {
+				const hub = env.MODERATION_HUB.get(env.MODERATION_HUB.idFromName('global'));
+				const listRes = await hub.fetch(new Request('http://internal/list'));
+				const data = await listRes.json();
+				const reports = data.reports || [];
+				const nameByUid = await resolveReportPlayerNames(env, reports);
+				const status = errFlash && !successMsg ? 400 : 200;
+				return new Response(
+					renderReportsAdminPage(reports, nameByUid, {
+						embeddedSecret: okSecret,
+						successMsg: successMsg || undefined,
+						errorMsg: errFlash || undefined
+					}),
+					{ status, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+				);
+			} catch (e) {
+				return new Response(
+					renderReportsAdminPage([], {}, { embeddedSecret: okSecret, errorMsg: errFlash || 'Could not reload list.' }),
+					{ status: 500, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+				);
+			}
 		}
 
 		if (url.pathname === '/report') {
@@ -532,20 +819,7 @@ export default {
 		if (url.pathname === '/reset-player') {
 			const uid = url.searchParams.get('uid');
 			if (!uid) return new Response('Missing UID', { status: 400 });
-
-			// 1. Get current username to release it
-			let p = env.PLAYER_PROFILE.get(env.PLAYER_PROFILE.idFromName(uid));
-			let pRes = await p.fetch(new Request('http://internal/get-stats'));
-			let pData = await pRes.json();
-			
-			if (pData.username) {
-				let reg = env.USERNAME_REGISTRY.get(env.USERNAME_REGISTRY.idFromName('global'));
-				await reg.fetch(new Request(`http://internal/release?uid=${uid}&name=${encodeURIComponent(pData.username)}`));
-			}
-
-			// 2. Wipe profile
-			await p.fetch(new Request('http://internal/wipe'));
-			
+			await performResetPlayer(env, uid);
 			return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' }});
 		}
 
@@ -1125,6 +1399,19 @@ export class UsernameRegistry {
 			const uid = await this.state.storage.get(`name:${name}`);
 			if (!uid) return new Response(JSON.stringify({ ok: false }));
 			return new Response(JSON.stringify({ ok: true, uid }));
+		}
+
+		if (url.pathname === '/lookup-name') {
+			const uid = url.searchParams.get('uid');
+			if (!uid) {
+				return new Response(JSON.stringify({ ok: false, username: null }), {
+					headers: { 'Content-Type': 'application/json' }
+				});
+			}
+			const username = await this.state.storage.get(`uid:${uid}`);
+			return new Response(JSON.stringify({ ok: true, username: username || null }), {
+				headers: { 'Content-Type': 'application/json' }
+			});
 		}
 
 		if (url.pathname === '/release') {
@@ -1768,6 +2055,21 @@ export class Leaderboard {
 			}
 		}
 
+		if (url.pathname === '/remove-uid' && request.method === 'POST') {
+			try {
+				const body = await request.json();
+				const uid = body && body.uid;
+				if (!uid) return new Response(JSON.stringify({ ok: false }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+				let top50 = (await this.state.storage.get('top50')) || [];
+				top50 = top50.filter((row) => row.uid !== uid);
+				await this.state.storage.put('top50', top50);
+				await this.state.storage.delete('cache_ranks');
+				return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' } });
+			} catch (e) {
+				return new Response(JSON.stringify({ ok: false }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+			}
+		}
+
 		if (url.pathname === '/wipe') {
 			await this.state.storage.deleteAll();
 			return new Response('OK');
@@ -1805,6 +2107,25 @@ export class ModerationHub {
 				});
 			} catch (e) {
 				return new Response(JSON.stringify({ ok: false, reports: [] }), { status: 500, headers: { "Content-Type": "application/json" } });
+			}
+		}
+		if (url.pathname === "/remove-report" && request.method === "POST") {
+			try {
+				const body = await request.json();
+				const ts = body && body.ts;
+				const reporterUid = body && body.reporterUid;
+				const reportedUid = body && body.reportedUid;
+				let list = (await this.state.storage.get("reports")) || [];
+				const before = list.length;
+				list = list.filter(
+					(r) => !(r.ts === ts && r.reporterUid === reporterUid && r.reportedUid === reportedUid)
+				);
+				await this.state.storage.put("reports", list);
+				return new Response(JSON.stringify({ ok: true, removed: before - list.length }), {
+					headers: { "Content-Type": "application/json" }
+				});
+			} catch (e) {
+				return new Response(JSON.stringify({ ok: false, removed: 0 }), { status: 500, headers: { "Content-Type": "application/json" } });
 			}
 		}
 		return new Response("Not found", { status: 404 });
