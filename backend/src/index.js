@@ -7,7 +7,13 @@ const rateLimitBuckets = new Map();
 
 function corsHeaders(request, extra = {}) {
 	const origin = request.headers.get('Origin');
-	const allowedOrigin = ALLOWED_ORIGINS.has(origin) ? origin : 'https://warpgamestv.com';
+	let allowedOrigin = 'https://warpgamestv.com';
+	if (
+		origin &&
+		(ALLOWED_ORIGINS.has(origin) || /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin))
+	) {
+		allowedOrigin = origin;
+	}
 	return {
 		...extra,
 		'Access-Control-Allow-Origin': allowedOrigin,
@@ -324,7 +330,81 @@ export default {
 			let mmId = env.MATCHMAKER.idFromName('global-matchmaker');
 			return env.MATCHMAKER.get(mmId).fetch(new Request(`http://internal/join-private?code=${code}`));
 		}
+		if (url.pathname === '/report') {
+			if (request.method === 'OPTIONS') {
+				return new Response(null, {
+					headers: corsHeaders(request, {
+						'Access-Control-Allow-Methods': 'POST, OPTIONS',
+						'Access-Control-Allow-Headers': 'Content-Type'
+					})
+				});
+			}
+			if (request.method === 'POST') {
+				try {
+					const body = await request.json();
+					const reporterUid = (body.reporterUid || '').trim();
+					const clientIp = request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || 'unknown';
+					if (isRateLimited(`report:${reporterUid || clientIp}:${clientIp}`, 8, 60_000)) {
+						return new Response(JSON.stringify({ ok: false, error: 'Too many reports. Try again later.' }), {
+							status: 429,
+							headers: jsonHeaders
+						});
+					}
+					const hub = env.MODERATION_HUB.get(env.MODERATION_HUB.idFromName('global'));
+					await hub.fetch(
+						new Request('http://internal/append', {
+							method: 'POST',
+							headers: { 'Content-Type': 'application/json' },
+							body: JSON.stringify({
+								ts: Date.now(),
+								reporterUid: reporterUid || null,
+								reportedUid: body.reportedUid || null,
+								roomId: body.roomId || null,
+								category: String(body.category || 'other').slice(0, 64),
+								details: String(body.details || '').slice(0, 2000),
+								clientVersion: body.clientVersion || null
+							})
+						})
+					);
+					console.log('[report]', { reporterUid, category: body.category });
+					return new Response(JSON.stringify({ ok: true }), { headers: jsonHeaders });
+				} catch (e) {
+					return new Response(JSON.stringify({ ok: false, error: 'Invalid request' }), { status: 400, headers: jsonHeaders });
+				}
+			}
+			return new Response(JSON.stringify({ ok: false }), { status: 405, headers: jsonHeaders });
+		}
 
+		if (url.pathname === '/unlock-premium') {
+			if (request.method === 'OPTIONS') {
+				return new Response(null, {
+					headers: corsHeaders(request, {
+						'Access-Control-Allow-Methods': 'POST, OPTIONS',
+						'Access-Control-Allow-Headers': 'Content-Type'
+					})
+				});
+			}
+			if (request.method === 'POST') {
+				try {
+					const body = await request.json();
+					const uid = body.uid;
+					if (!uid) {
+						return new Response(JSON.stringify({ ok: false, error: 'Missing uid' }), { status: 400, headers: jsonHeaders });
+					}
+					const profile = env.PLAYER_PROFILE.get(env.PLAYER_PROFILE.idFromName(uid));
+					return profile.fetch(
+						new Request(`http://internal/unlock-premium?uid=${encodeURIComponent(uid)}`, {
+							method: 'POST',
+							headers: { 'Content-Type': 'application/json' },
+							body: '{}'
+						})
+					);
+				} catch (e) {
+					return new Response(JSON.stringify({ ok: false }), { status: 400, headers: jsonHeaders });
+				}
+			}
+			return new Response(JSON.stringify({ ok: false }), { status: 405, headers: jsonHeaders });
+		}
 		if (url.pathname === '/system-reset') {
 			const secret = request.headers.get('X-Dev-Secret');
 			if (secret !== 'dev-reset-2026') {
@@ -375,7 +455,100 @@ function generateRandomUsername() {
 	return `${adj}${noun}${num}`;
 }
 
-/** Account rank = sum(class.level) - (n - 1); baseline all at 1 => rank 1 */
+
+const QUEST_CATALOG = [
+	{ id: 'd_play', label: 'Complete a match', slot: 'daily', target: 1, metric: 'matches' },
+	{ id: 'd_win', label: 'Win a match', slot: 'daily', target: 1, metric: 'wins' },
+	{ id: 'w_wins', label: 'Win 3 matches', slot: 'weekly', target: 3, metric: 'wins' },
+	{ id: 'w_play', label: 'Play 10 matches', slot: 'weekly', target: 10, metric: 'matches' }
+];
+
+const BP_RANK_REWARDS = {
+	1: { type: 'title', id: 'recruit', name: 'Recruit' },
+	2: { type: 'emote', id: 'hype', name: '🎈 Hype' },
+	3: { type: 'skin', id: 'verdant', name: 'Verdant' },
+	4: { type: 'credits', id: 'lumens', amount: 20, name: '+20 Lumens' },
+	5: { type: 'title', id: 'warrior', name: 'Warrior' },
+	6: { type: 'skin', id: 'crimson_knight', name: 'Crimson Knight' },
+	7: { type: 'credits', id: 'lumens', amount: 20, name: '+20 Lumens' },
+	8: { type: 'title', id: 'tactician', name: 'Tactician' },
+	9: { type: 'credits', id: 'lumens', amount: 20, name: '+20 Lumens' },
+	10: { type: 'skin', id: 'abyssal', name: 'Abyssal' },
+	11: { type: 'skin', id: 'astral_sage', name: 'Astral Sage' },
+	12: { type: 'credits', id: 'lumens', amount: 20, name: '+20 Lumens' },
+	13: { type: 'title', id: 'arc_warden', name: 'Arc Warden' },
+	14: { type: 'title', id: 'starforged', name: 'Starforged' },
+	15: { type: 'title', id: 'grandmaster', name: 'Grandmaster' },
+	16: { type: 'title', id: 'mythbreaker', name: 'Mythbreaker' },
+	17: { type: 'title', id: 'season_vanguard', name: 'Season Vanguard' },
+	18: { type: 'credits', id: 'lumens', amount: 20, name: '+20 Lumens' },
+	19: { type: 'title', id: 'paragon', name: 'Paragon' },
+	20: { type: 'skin', id: 'legend', name: 'Lumen Legend' }
+};
+
+function utcDayKey() {
+	return new Date().toISOString().slice(0, 10);
+}
+
+function utcWeekKey(d = new Date()) {
+	const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+	date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
+	const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+	const weekNo = Math.ceil(((date - yearStart) / 86400000 + 1) / 7);
+	return `${date.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
+
+function ensureQuestBuckets(stats) {
+	stats.questMetrics = stats.questMetrics || { daily: {}, weekly: {} };
+	let changed = false;
+	const dk = utcDayKey();
+	const wk = utcWeekKey();
+	const d = stats.questMetrics.daily || {};
+	const w = stats.questMetrics.weekly || {};
+	if (d.periodKey !== dk) {
+		stats.questMetrics.daily = { periodKey: dk, wins: 0, matches: 0, claimed: {} };
+		changed = true;
+	} else {
+		stats.questMetrics.daily = {
+			periodKey: dk,
+			wins: d.wins || 0,
+			matches: d.matches || 0,
+			claimed: d.claimed && typeof d.claimed === 'object' ? d.claimed : {}
+		};
+	}
+	if (w.periodKey !== wk) {
+		stats.questMetrics.weekly = { periodKey: wk, wins: 0, matches: 0, claimed: {} };
+		changed = true;
+	} else {
+		stats.questMetrics.weekly = {
+			periodKey: wk,
+			wins: w.wins || 0,
+			matches: w.matches || 0,
+			claimed: w.claimed && typeof w.claimed === 'object' ? w.claimed : {}
+		};
+	}
+	return changed;
+}
+
+function questProgress(bucket, q) {
+	if (q.metric === 'wins') return bucket.wins || 0;
+	return bucket.matches || 0;
+}
+
+function grantBpRewardsForRankUp(stats, fromLevel, toLevel) {
+	stats.lumens = Math.max(0, Number(stats.lumens) || 0);
+	for (let lvl = fromLevel + 1; lvl <= toLevel; lvl++) {
+		const r = BP_RANK_REWARDS[lvl];
+		if (!r) continue;
+		if (r.type === 'emote') {
+			if (!stats.unlockedCosmetics.includes(r.id)) stats.unlockedCosmetics.push(r.id);
+		} else if (r.type === 'title') {
+			if (!stats.unlockedTitles.includes(r.name)) stats.unlockedTitles.push(r.name);
+		} else if (r.type === 'credits' && r.id === 'lumens') {
+			stats.lumens += Math.max(0, Number(r.amount) || 0);
+		}
+	}
+}
 function syncAccountLevelFromClasses(stats) {
 	const cls = stats.classes || {};
 	const keys = Object.keys(cls);
@@ -409,6 +582,9 @@ export class PlayerProfile {
 			xp: 0, 
 			wins: 0, 
 			losses: 0, 
+			lumens: 0,
+			luminaryPassXp: 0,
+			bpPremiumUnlocked: false,
 			username: null, 
 			matchHistory: [],
 			classes: {
@@ -451,10 +627,15 @@ export class PlayerProfile {
 		}
 
 		if (url.pathname === '/get-stats') {
-			if (syncAccountLevelFromClasses(stats)) {
-				await this.state.storage.put('stats', stats);
-			}
-			return new Response(JSON.stringify(stats), { headers: corsHeaders(request) });
+			let dirty = false;
+			if (syncAccountLevelFromClasses(stats)) dirty = true;
+			if (ensureQuestBuckets(stats)) dirty = true;
+			stats.lumens = Math.max(0, Number(stats.lumens) || 0);
+			stats.luminaryPassXp = Math.max(0, Number(stats.luminaryPassXp) || 0);
+			if (stats.bpPremiumUnlocked === undefined) stats.bpPremiumUnlocked = false;
+			if (dirty) await this.state.storage.put('stats', stats);
+			const out = { ...stats, questCatalog: QUEST_CATALOG };
+			return new Response(JSON.stringify(out), { headers: corsHeaders(request) });
 		}
 
 		if (url.pathname === '/set-name') {
@@ -464,21 +645,44 @@ export class PlayerProfile {
 		}
 
 		if (url.pathname === '/add-xp') {
-			let isWin = url.searchParams.get('win') === 'true';
-			let classId = url.searchParams.get('classId') || 'aegisKnight';
+			let isWin = false;
+			let classId = 'aegisKnight';
+			let uid = url.searchParams.get('uid') || 'unknown';
+			let matchSnap = { damageDealt: 0, damageTaken: 0, abilitiesUsed: 0, turnSwaps: 0 };
+
+			if (request.method === 'POST') {
+				try {
+					const j = await request.json();
+					isWin = !!j.win;
+					classId = j.classId || 'aegisKnight';
+					uid = j.uid || uid;
+					if (j.matchStats && typeof j.matchStats === 'object') {
+						matchSnap.damageDealt = Math.max(0, Number(j.matchStats.damageDealt) || 0);
+						matchSnap.damageTaken = Math.max(0, Number(j.matchStats.damageTaken) || 0);
+						matchSnap.abilitiesUsed = Math.max(0, Number(j.matchStats.abilitiesUsed) || 0);
+						matchSnap.turnSwaps = Math.max(0, Number(j.matchStats.turnSwaps) || 0);
+					}
+				} catch (e) {
+					isWin = url.searchParams.get('win') === 'true';
+					classId = url.searchParams.get('classId') || 'aegisKnight';
+					uid = url.searchParams.get('uid') || uid;
+				}
+			} else {
+				isWin = url.searchParams.get('win') === 'true';
+				classId = url.searchParams.get('classId') || 'aegisKnight';
+				uid = url.searchParams.get('uid') || uid;
+			}
+
 			let xpGained = isWin ? 50 : 10;
-			
-			// Update Global Stats
+
 			if (isWin) stats.wins += 1;
 			else stats.losses += 1;
 			stats.xp += xpGained;
 
-			// Update PER-CLASS Stats
 			if (!stats.classes[classId]) stats.classes[classId] = { level: 1, xp: 0 };
 			let c = stats.classes[classId];
 			c.xp += xpGained;
-			
-			// Per-Character Levelup (100xp curve)
+
 			let neededXP = c.level * 100;
 			let leveledUp = false;
 			while (c.xp >= neededXP) {
@@ -490,22 +694,37 @@ export class PlayerProfile {
 
 			const oldAccountLevel = stats.level;
 			syncAccountLevelFromClasses(stats);
+			grantBpRewardsForRankUp(stats, oldAccountLevel, stats.level);
 
-			// Check Battle Pass Rewards
-			const REWARDS = {
-				2: { type: 'emote', id: 'hype', name: '🎈 Hype' },
-				5: { type: 'title', id: 'warrior', name: 'Warrior' },
-				10: { type: 'skin', id: 'abyssal', name: 'Abyssal' },
-				15: { type: 'title', id: 'grandmaster', name: 'Grandmaster' },
-				20: { type: 'skin', id: 'legend', name: 'Lumen Legend' }
-			};
+			stats.lumens = Math.max(0, Number(stats.lumens) || 0);
+			stats.luminaryPassXp = Math.max(0, Number(stats.luminaryPassXp) || 0);
+			stats.luminaryPassXp += xpGained;
 
-			for (let lvl = oldAccountLevel + 1; lvl <= stats.level; lvl++) {
-				if (REWARDS[lvl]) {
-					const r = REWARDS[lvl];
-					if (r.type === 'emote') stats.unlockedCosmetics.push(r.id);
-					if (r.type === 'title') stats.unlockedTitles.push(r.name);
-					// Skins are handled specifically later in the equip UI
+			ensureQuestBuckets(stats);
+			const questCompleted = [];
+			const lumensPerQuest = 5;
+			const daily = stats.questMetrics.daily;
+			const weekly = stats.questMetrics.weekly;
+			const prevD = { wins: daily.wins, matches: daily.matches };
+			const prevW = { wins: weekly.wins, matches: weekly.matches };
+			daily.matches += 1;
+			weekly.matches += 1;
+			if (isWin) {
+				daily.wins += 1;
+				weekly.wins += 1;
+			}
+			for (const q of QUEST_CATALOG) {
+				const bucket = q.slot === 'daily' ? daily : weekly;
+				const prev = q.slot === 'daily' ? prevD : prevW;
+				const prevVal = q.metric === 'wins' ? prev.wins : prev.matches;
+				const metricVal = questProgress(bucket, q);
+				const target = q.target;
+				const wasDone = !!bucket.claimed[q.id] || prevVal >= target;
+				const nowDone = !!bucket.claimed[q.id] || metricVal >= target;
+				if (!wasDone && nowDone && !bucket.claimed[q.id]) {
+					bucket.claimed[q.id] = true;
+					questCompleted.push({ id: q.id, label: q.label });
+					stats.lumens += lumensPerQuest;
 				}
 			}
 
@@ -523,9 +742,7 @@ export class PlayerProfile {
 			stats.lastSeen = Date.now();
 			await this.state.storage.put('stats', stats);
 
-			// PUSH TO LEADERBOARD asynchronously (non-blocking)
 			if (isWin && stats.username) {
-				const uid = url.searchParams.get('uid') || 'unknown';
 				this.env.LEADERBOARD.get(this.env.LEADERBOARD.idFromName('global')).fetch(
 					new Request('http://internal/update', {
 						method: 'POST',
@@ -537,14 +754,21 @@ export class PlayerProfile {
 							xp: stats.xp
 						})
 					})
-				).catch(e => console.error('Leaderboard update failed', e));
+				).catch((e) => console.error('Leaderboard update failed', e));
 			}
 
-			return new Response(JSON.stringify({
-				...stats,
-				lastMatchClassId: classId,
-				xpGained: xpGained
-			}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+			return new Response(
+				JSON.stringify({
+					...stats,
+					questCatalog: QUEST_CATALOG,
+					lastMatchClassId: classId,
+					xpGained,
+					leveledUp,
+					questCompleted,
+					matchStats: matchSnap
+				}),
+				{ status: 200, headers: { 'Content-Type': 'application/json' } }
+			);
 		}
 
 		if (url.pathname === '/save-customization') {
@@ -650,6 +874,27 @@ export class PlayerProfile {
 			return new Response('OK');
 		}
 
+		if (url.pathname === '/unlock-premium' && request.method === 'POST') {
+			const cost = 100;
+			stats.lumens = Math.max(0, Number(stats.lumens) || 0);
+			if (stats.bpPremiumUnlocked) {
+				const out = { ...stats, questCatalog: QUEST_CATALOG };
+				return new Response(JSON.stringify({ ok: true, already: true, stats: out }), {
+					headers: { 'Content-Type': 'application/json' }
+				});
+			}
+			if (stats.lumens < cost) {
+				return new Response(JSON.stringify({ ok: false, error: 'Not enough Lumens' }), {
+					status: 400,
+					headers: { 'Content-Type': 'application/json' }
+				});
+			}
+			stats.lumens -= cost;
+			stats.bpPremiumUnlocked = true;
+			await this.state.storage.put('stats', stats);
+			const out = { ...stats, questCatalog: QUEST_CATALOG };
+			return new Response(JSON.stringify({ ok: true, stats: out }), { headers: { 'Content-Type': 'application/json' } });
+		}
 		if (url.pathname === '/wipe') {
 			await this.state.storage.deleteAll();
 			return new Response('OK');
@@ -914,7 +1159,8 @@ export class GameRoom {
 			username: 'Player',
 			abilities: classData.abilities.map(a => ({...a})),
 			shield: { active: false, percent: 0 },
-			dodge: false
+			dodge: false,
+			matchStats: { damageDealt: 0, damageTaken: 0, abilitiesUsed: 0, turnSwaps: 0 }
 		};
 		this.sessions.push({ ws: server, id: pId, uid: playerId });
 
@@ -1048,6 +1294,7 @@ export class GameRoom {
 						p.abilities = classData.abilities.map(a => ({...a}));
 						p.shield = { active: false, percent: 0 };
 						p.dodge = false;
+						p.matchStats = { damageDealt: 0, damageTaken: 0, abilitiesUsed: 0, turnSwaps: 0 };
 					}
 
 					this.gameState.status = 'IN_PROGRESS';
@@ -1077,6 +1324,14 @@ export class GameRoom {
 				const ability = player.abilities[idx];
 				if (ability.currentCd > 0) return; // Still on cooldown
 
+				if (!player.matchStats) {
+					player.matchStats = { damageDealt: 0, damageTaken: 0, abilitiesUsed: 0, turnSwaps: 0 };
+				}
+				if (!opponent.matchStats) {
+					opponent.matchStats = { damageDealt: 0, damageTaken: 0, abilitiesUsed: 0, turnSwaps: 0 };
+				}
+				player.matchStats.abilitiesUsed += 1;
+
 				// Apply ability effects
 				if (ability.type === 'damage') {
 					let dmg = ability.dmg + (player.atkBonus || 0);
@@ -1088,6 +1343,10 @@ export class GameRoom {
 						opponent.shield = { active: false, percent: 0 };
 					}
 					opponent.health -= dmg;
+					if (dmg > 0) {
+						player.matchStats.damageDealt += dmg;
+						opponent.matchStats.damageTaken += dmg;
+					}
 				} else if (ability.type === 'drain') {
 					let dmg = ability.dmg + (player.atkBonus || 0);
 					if (opponent.dodge) {
@@ -1098,6 +1357,10 @@ export class GameRoom {
 						opponent.shield = { active: false, percent: 0 };
 					}
 					opponent.health -= dmg;
+					if (dmg > 0) {
+						player.matchStats.damageDealt += dmg;
+						opponent.matchStats.damageTaken += dmg;
+					}
 					player.health = Math.min(player.maxHealth, player.health + (ability.healAmt || 0));
 				} else if (ability.type === 'heal') {
 					player.health = Math.min(player.maxHealth, player.health + (ability.healAmt || 0));
@@ -1130,7 +1393,24 @@ export class GameRoom {
 						if (!p || !p.uid) return null;
 						try {
 							let xpDO = this.env.PLAYER_PROFILE.get(this.env.PLAYER_PROFILE.idFromName(p.uid));
-							const res = await xpDO.fetch(new Request(`http://internal/add-xp?win=${isWin}&uid=${p.uid}&classId=${p.classId}`));
+							const ms = p.matchStats || {};
+							const res = await xpDO.fetch(
+								new Request("http://internal/add-xp", {
+									method: "POST",
+									headers: { "Content-Type": "application/json" },
+									body: JSON.stringify({
+										win: isWin,
+										uid: p.uid,
+										classId: p.classId,
+										matchStats: {
+											damageDealt: ms.damageDealt || 0,
+											damageTaken: ms.damageTaken || 0,
+											abilitiesUsed: ms.abilitiesUsed || 0,
+											turnSwaps: ms.turnSwaps || 0
+										}
+									})
+								})
+							);
 							const updatedStats = await res.json();
 							return {
 								xpGained: isWin ? 50 : 10,
@@ -1141,7 +1421,6 @@ export class GameRoom {
 							return null;
 						}
 					};
-
 					const [p1Results, p2Results] = await Promise.all([
 						awardXP(p1, p1.health > 0),
 						awardXP(p2, p2.health > 0)
@@ -1153,6 +1432,7 @@ export class GameRoom {
 					this.broadcastState();
 				} else {
 					// Pass turn and tick the next player's cooldowns
+					player.matchStats.turnSwaps += 1;
 					this.gameState.turn = this.gameState.turn === 0 ? 1 : 0;
 					const nextPlayerId = this.gameState.turn === 0 ? 'p1' : 'p2';
 					for (let ab of this.gameState.players[nextPlayerId].abilities) {
@@ -1386,3 +1666,28 @@ export class Leaderboard {
 		return new Response('Not found', { status: 404 });
 	}
 }
+
+export class ModerationHub {
+	constructor(state, env) {
+		this.state = state;
+		this.env = env;
+	}
+
+	async fetch(request) {
+		const url = new URL(request.url);
+		if (url.pathname === "/append" && request.method === "POST") {
+			try {
+				const row = await request.json();
+				let list = (await this.state.storage.get("reports")) || [];
+				list.push(row);
+				if (list.length > 500) list = list.slice(-500);
+				await this.state.storage.put("reports", list);
+				return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
+			} catch (e) {
+				return new Response(JSON.stringify({ ok: false }), { status: 500, headers: { "Content-Type": "application/json" } });
+			}
+		}
+		return new Response("Not found", { status: 404 });
+	}
+}
+
