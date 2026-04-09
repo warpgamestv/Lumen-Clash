@@ -5,8 +5,10 @@ const path = require('path');
 const API_ROUTES = [
     '/profile', '/set-username', '/leaderboard', '/add-friend', '/remove-friend', '/friends-status',
     '/create-private', '/join-private', '/update-presence', '/accept-friend', '/decline-friend',
-    '/lobby-update', '/system-reset', '/reset-player', '/save-customization',
-    '/friend-duel-invite', '/friend-duel-decline', '/friend-duel-accept', '/report', '/unlock-premium', '/admin/reports', '/admin/moderate'
+    '/lobby-update', '/system-reset', '/reset-player', '/save-customization', '/claim-quest', '/public-config',
+    '/guild/create', '/guild/join', '/guild/leave', '/guild/info', '/guild/chat', '/guild/directory', '/guild/update', '/guild/member-role',
+    '/friend-duel-invite', '/friend-duel-decline', '/friend-duel-accept', '/report', '/unlock-premium',
+    '/admin', '/admin/lookup', '/admin/players', '/admin/refresh', '/admin/reports', '/admin/events', '/admin/flags', '/admin/announcements', '/admin/moderate'
 ];
 
 const BACKEND_PORT = 8790;

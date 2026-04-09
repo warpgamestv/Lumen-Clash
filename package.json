@@ -5,9 +5,14 @@
     "dev-backend": "cd backend && npm run dev",
     "dev-frontend": "node frontend/server.js",
     "wipe-all": "node wipe-all-data.js",
-    "test": "node test_connection.js"
+    "test": "node test_connection.js",
+    "deploy": "wrangler deploy",
+    "preview": "wrangler dev"
   },
   "dependencies": {
     "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.79.0"
   }
 }

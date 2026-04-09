@@ -15,6 +15,7 @@ routes = [
   { pattern = "warpgamestv.com/create-private*", zone_name = "warpgamestv.com" },
   { pattern = "warpgamestv.com/join-private*", zone_name = "warpgamestv.com" },
   { pattern = "warpgamestv.com/update-presence*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/guild*", zone_name = "warpgamestv.com" },
   { pattern = "warpgamestv.com/accept-friend*", zone_name = "warpgamestv.com" },
   { pattern = "warpgamestv.com/decline-friend*", zone_name = "warpgamestv.com" },
   { pattern = "warpgamestv.com/lobby-update*", zone_name = "warpgamestv.com" },
@@ -25,6 +26,8 @@ routes = [
   { pattern = "warpgamestv.com/friend-duel-accept*", zone_name = "warpgamestv.com" },
   { pattern = "warpgamestv.com/report*", zone_name = "warpgamestv.com" },
   { pattern = "warpgamestv.com/unlock-premium*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/public-config*", zone_name = "warpgamestv.com" },
+  { pattern = "warpgamestv.com/admin*", zone_name = "warpgamestv.com" },
   { pattern = "warpgamestv.com/admin/*", zone_name = "warpgamestv.com" },
   { pattern = "www.warpgamestv.com/play*", zone_name = "warpgamestv.com" },
   { pattern = "www.warpgamestv.com/profile*", zone_name = "warpgamestv.com" },
@@ -37,6 +40,7 @@ routes = [
   { pattern = "www.warpgamestv.com/create-private*", zone_name = "warpgamestv.com" },
   { pattern = "www.warpgamestv.com/join-private*", zone_name = "warpgamestv.com" },
   { pattern = "www.warpgamestv.com/update-presence*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/guild*", zone_name = "warpgamestv.com" },
   { pattern = "www.warpgamestv.com/accept-friend*", zone_name = "warpgamestv.com" },
   { pattern = "www.warpgamestv.com/decline-friend*", zone_name = "warpgamestv.com" },
   { pattern = "www.warpgamestv.com/lobby-update*", zone_name = "warpgamestv.com" },
@@ -47,6 +51,8 @@ routes = [
   { pattern = "www.warpgamestv.com/friend-duel-accept*", zone_name = "warpgamestv.com" },
   { pattern = "www.warpgamestv.com/report*", zone_name = "warpgamestv.com" },
   { pattern = "www.warpgamestv.com/unlock-premium*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/public-config*", zone_name = "warpgamestv.com" },
+  { pattern = "www.warpgamestv.com/admin*", zone_name = "warpgamestv.com" },
   { pattern = "www.warpgamestv.com/admin/*", zone_name = "warpgamestv.com" }
 ]
 
@@ -97,4 +103,20 @@ class_name = "Leaderboard"
 [[durable_objects.bindings]]
 name = "MODERATION_HUB"
 class_name = "ModerationHub"
+
+[[durable_objects.bindings]]
+name = "PARTY_ROOM"
+class_name = "PartyRoom"
+
+[[migrations]]
+tag = "v7"
+new_sqlite_classes = ["PartyRoom"]
+
+[[durable_objects.bindings]]
+name = "GUILD_REGISTRY"
+class_name = "GuildRegistry"
+
+[[migrations]]
+tag = "v8"
+new_sqlite_classes = ["GuildRegistry"]
 

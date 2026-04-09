@@ -16,17 +16,20 @@ const config = {
 };
 
 let game = null;
+/** Declared before `syncGameContainerPointerEvents` runs at load (avoid TDZ ReferenceError). */
+let gameState = null;
 
 function getGameContainer() {
     return document.getElementById('game-container');
 }
 
-/** Canvas is decorative on the main menu; during matches nothing on the canvas is clicked (abilities are HTML). */
+/** Keep pointer-events off the canvas unless battle is active — otherwise WebKit can composite the WebGL layer above queue/hero-select HTML. Phaser sets the canvas to pointer-events:auto by default, which steals clicks in menu dead-zones (side margins). See `#game-container` / `.game-container--battle` in style.css. */
 function syncGameContainerPointerEvents() {
     const gc = getGameContainer();
     if (!gc) return;
-    const mainHidden = document.getElementById('main-menu-container').classList.contains('hidden');
-    gc.style.pointerEvents = mainHidden ? 'auto' : 'none';
+    const battle = !!(gameState && gameState.status === 'IN_PROGRESS');
+    gc.classList.toggle('game-container--battle', battle);
+    gc.style.pointerEvents = battle ? 'auto' : 'none';
 }
 
 function syncRootLayoutClasses() {
@@ -74,14 +77,20 @@ initGame();
 
 let socket;
 let myPlayerId = null;
-let gameState = null;
 let prevMyHealth = -1;
 let prevOpponentHealth = -1;
+let prevTeammateHealth = -1; // 2v2
+let prevOpponent2Health = -1; // 2v2
 let reconnectAttempts = 0;
 let reconnectTimer = null;
 let manualSocketClose = false;
+let lastReportContext = { reportedUid: null, roomId: null };
 let lastRoomId = null;
 let lastTurnSnapshot = null;
+let heroSelectLocked = false;
+let heroSelectPick = { charId: null, skin: 'Default' };
+let heroSelectCountdownUntil = 0;
+let heroSelectCountdownTimer = null;
 
 const matchStats = {
     active: false,
@@ -109,6 +118,51 @@ if (!localUid) {
     localUid = generateUUID();
     localStorage.setItem('lumen_clash_uid', localUid);
 }
+
+let activeSocialTab = 'friends';
+let guildDirectoryCache = [];
+let guildFocusState = null;
+let guildScrollState = 0;
+let guildContainerScrollState = 0;
+let guildTabPanelScrollState = 0;
+let guildDirectoryFilters = { query: '', recruitingOnly: true, sort: 'fit' };
+let guildNoGuildView = 'home';
+let guildInfoHydrationPromise = null;
+let guildDraftState = {
+    createName: '',
+    createTag: '',
+    createDescription: '',
+    createIcon: 'comet',
+    createBanner: 'aurora',
+    createPrivacy: 'public',
+    joinCode: '',
+    adminGuildId: null,
+    adminDescription: '',
+    adminIcon: 'comet',
+    adminBanner: 'aurora',
+    adminPrivacy: 'public',
+    adminRecruitmentStatus: 'recruiting',
+    adminRecruitmentMessage: '',
+    adminRecruitmentFocus: 'all_modes',
+    adminRecruitmentPlaystyle: 'mixed',
+    adminBulletinMessage: '',
+    chatGuildId: null,
+    chatInput: ''
+};
+
+const GUILD_ICON_PRESETS = [
+    { id: 'comet', label: 'Comet', crest: 'CM' },
+    { id: 'crown', label: 'Crown', crest: 'CR' },
+    { id: 'nova', label: 'Nova', crest: 'NV' },
+    { id: 'wolf', label: 'Wolf', crest: 'WF' }
+];
+
+const GUILD_BANNER_PRESETS = [
+    { id: 'aurora', label: 'Aurora' },
+    { id: 'ember', label: 'Ember' },
+    { id: 'forest', label: 'Forest' },
+    { id: 'royal', label: 'Royal' }
+];
 
 // ============================================================
 // CLIENT PREFERENCES (perf overlay + accessibility)
@@ -470,18 +524,24 @@ function computeDesiredPresence() {
     if (typeof document !== 'undefined' && document.hidden) return 'away';
     const mainHidden = document.getElementById('main-menu-container').classList.contains('hidden');
     const matchmaking = !document.getElementById('matchmaking-overlay').classList.contains('hidden');
+    const heroSel = document.getElementById('hero-select-overlay');
+    const heroSelectOpen = heroSel && !heroSel.classList.contains('hidden');
     const inGame = !document.getElementById('ui-container').classList.contains('hidden');
     const priv = !document.getElementById('private-match-container').classList.contains('hidden');
-    if (inGame || matchmaking) return 'match';
+    if (inGame || matchmaking || heroSelectOpen) return 'match';
     if (priv) return 'private_lobby';
     if (!mainHidden) return 'menu';
     return 'menu';
 }
 
+let lastPresencePing = 0;
 async function reportPresenceIfChanged(force = false) {
     const state = computeDesiredPresence();
-    if (!force && state === lastReportedPresence) return;
+    const now = Date.now();
+    const needsPing = now - lastPresencePing >= 30000;
+    if (!force && !needsPing && state === lastReportedPresence) return;
     lastReportedPresence = state;
+    lastPresencePing = now;
     try {
         await fetch('/update-presence', {
             method: 'POST',
@@ -496,6 +556,7 @@ document.addEventListener('visibilitychange', () => reportPresenceIfChanged(true
 // Presence / Social Heartbeat (Reverted to 10s Separate Polls)
 function pollMenuData() {
     reportPresenceIfChanged();
+    fetchPublicConfig();
     // Only poll if on main menu
     const isMainMenu = !document.getElementById('main-menu-container').classList.contains('hidden');
     if (isMainMenu) {
@@ -512,6 +573,7 @@ function pollMenuData() {
 }
 setInterval(pollMenuData, 10000); // Back to 10s
 pollMenuData();
+fetchPublicConfig();
 
 console.log("Auto-update heartbeat active (10s separate)");
 
@@ -519,6 +581,34 @@ console.log("Auto-update heartbeat active (10s separate)");
 let myUsername = 'Player';
 let lastSocialSnapshot = null;
 let menuActivityPopoverOpen = false;
+let currentAnnouncementMessage = '';
+let lastPartyReadyCount = 0;
+
+function renderAnnouncementBar(message) {
+    const bar = document.getElementById('global-announcement-bar');
+    const text = document.getElementById('global-announcement-text');
+    if (!bar || !text) return;
+    const nextMessage = (message || '').trim();
+    if (!nextMessage) {
+        bar.classList.add('hidden');
+        text.textContent = '';
+        currentAnnouncementMessage = '';
+        return;
+    }
+    if (currentAnnouncementMessage !== nextMessage) {
+        text.textContent = nextMessage + '   •   ' + nextMessage + '   •   ';
+        currentAnnouncementMessage = nextMessage;
+    }
+    bar.classList.remove('hidden');
+}
+
+async function fetchPublicConfig() {
+    try {
+        const res = await fetch('/public-config');
+        const data = await res.json();
+        renderAnnouncementBar(data && data.announcement && data.announcement.active ? data.announcement.message : '');
+    } catch (e) {}
+}
 
 function syncMainMenuHeaderProfile(data) {
     const nameEl = document.getElementById('menu-header-username');
@@ -534,6 +624,92 @@ function syncMainMenuHeaderProfile(data) {
     titleEl.textContent = equippedTitle && String(equippedTitle).trim() ? equippedTitle : '';
     const rank = data && data.level != null ? data.level : playerProfileData && playerProfileData.level != null ? playerProfileData.level : 1;
     rankEl.textContent = `Rank ${rank}`;
+    syncMainMenuStatusWidgets(data);
+}
+
+function questMetricValue(bucket, quest) {
+    if (!bucket || !quest) return 0;
+    if (quest.metric === 'wins') return bucket.wins || 0;
+    if (quest.metric === 'damage') return bucket.damage || 0;
+    if (quest.metric === 'abilities') return bucket.abilities || 0;
+    return bucket.matches || 0;
+}
+
+function getRetentionSnapshot(profile = null) {
+    const p = profile || playerProfileData;
+    const snapshot = {
+        activeEvents: 0,
+        claimableQuests: 0,
+        trackedQuests: 0,
+        nextQuest: null,
+        nextQuestProgress: '',
+        lumens: p && p.lumens != null ? Number(p.lumens) || 0 : 0,
+        hasData: !!p
+    };
+    if (!p) return snapshot;
+
+    const activeEvents = Array.isArray(p.activeEvents) ? p.activeEvents : [];
+    snapshot.activeEvents = activeEvents.length;
+
+    const daily = p.questMetrics && p.questMetrics.daily ? p.questMetrics.daily : {};
+    const weekly = p.questMetrics && p.questMetrics.weekly ? p.questMetrics.weekly : {};
+    const questCatalog = Array.isArray(p.questCatalog) ? p.questCatalog : [];
+    const pending = [];
+    const ready = [];
+
+    questCatalog.forEach((quest) => {
+        const bucket = quest.slot === 'daily' ? daily : weekly;
+        const claimed = !!(bucket.claimed && bucket.claimed[quest.id]);
+        if (claimed) return;
+        const cur = questMetricValue(bucket, quest);
+        const pct = Math.min(100, Math.round((cur / Math.max(1, quest.target)) * 100));
+        const info = { quest, cur, pct };
+        if (cur >= quest.target) ready.push(info);
+        else pending.push(info);
+    });
+
+    pending.sort((a, b) => b.pct - a.pct);
+    snapshot.claimableQuests = ready.length;
+    snapshot.trackedQuests = pending.length + ready.length;
+    snapshot.nextQuest = ready[0] || pending[0] || null;
+    if (snapshot.nextQuest) {
+        const q = snapshot.nextQuest.quest;
+        snapshot.nextQuestProgress = snapshot.nextQuest.cur >= q.target
+            ? `${q.label} is ready to claim.`
+            : `${q.label} · ${snapshot.nextQuest.cur}/${q.target}`;
+    }
+    return snapshot;
+}
+
+function syncMainMenuStatusWidgets(data = null) {
+    const liveData = data || playerProfileData || {};
+    const statusMain = document.getElementById('menu-header-status-main');
+    const statusSub = document.getElementById('menu-header-status-sub');
+    const playRank = document.getElementById('menu-play-rank');
+    const playLumens = document.getElementById('menu-play-lumens');
+    const rank = liveData && liveData.level != null ? liveData.level : 1;
+    const lumens = liveData && liveData.lumens != null ? liveData.lumens : 0;
+    const snapshot = getRetentionSnapshot(liveData);
+    const activeEvents = Array.isArray(liveData.activeEvents) ? liveData.activeEvents : [];
+    if (statusMain) {
+        if (snapshot.claimableQuests > 0) statusMain.textContent = 'Rewards Ready';
+        else if (activeEvents.length) statusMain.textContent = 'Event Live';
+        else if (snapshot.nextQuest) statusMain.textContent = 'Progressing';
+        else statusMain.textContent = 'Online';
+    }
+    if (statusSub) {
+        if (snapshot.claimableQuests > 0) {
+            statusSub.textContent = `${snapshot.claimableQuests} quest${snapshot.claimableQuests === 1 ? '' : 's'} ready to claim`;
+        } else if (activeEvents.length) {
+            statusSub.textContent = `${activeEvents.length} event${activeEvents.length === 1 ? '' : 's'} active`;
+        } else if (snapshot.nextQuestProgress) {
+            statusSub.textContent = snapshot.nextQuestProgress;
+        } else {
+            statusSub.textContent = 'Arena calm';
+        }
+    }
+    if (playRank) playRank.textContent = String(rank);
+    if (playLumens) playLumens.textContent = String(lumens);
 }
 
 function refreshMenuActivityBadge(data) {
@@ -549,47 +725,182 @@ function refreshMenuActivityBadge(data) {
     }
 }
 
+function renderEventsActivitySection() {
+    const p = playerProfileData;
+    if (!p || !p.activeEvents || !p.activeEvents.length) return '';
+    const xm = p.eventXpMultiplier != null ? Number(p.eventXpMultiplier) : 1;
+    const lm = p.eventLumenMultiplier != null ? Number(p.eventLumenMultiplier) : 1;
+    
+    let metaLines = [];
+    if (xm !== 1 || lm !== 1) {
+        metaLines.push(`Pass XP ×${xm.toFixed(2)} · Quest lumens ×${lm.toFixed(2)}`);
+    }
+    
+    let rewardLines = [];
+    p.activeEvents.forEach(e => {
+        if (e.grantedTitles && e.grantedTitles.length) rewardLines.push(`Title: ${e.grantedTitles.join(', ')}`);
+        if (e.grantedCosmetics && e.grantedCosmetics.length) rewardLines.push(`Unlocks: ${e.grantedCosmetics.join(', ')}`);
+    });
+    if (rewardLines.length) metaLines.push(rewardLines.join(' · '));
+
+    const names = p.activeEvents.map((e) => e.name).join(' · ');
+    return `<div class="menu-activity-quest-block menu-activity-events"><h3 class="menu-activity-quest-head">Live events</h3><p class="menu-activity-event-line">${names}</p><p class="menu-activity-event-meta">${metaLines.join('<br>')}</p></div>`;
+}
+
+function renderMenuFocusSection() {
+    const snapshot = getRetentionSnapshot();
+    if (!snapshot.hasData) return '';
+
+    let title = 'Step back into the arena';
+    let copy = 'Queue up and keep building your account, roster, and reward track.';
+    if (snapshot.claimableQuests > 0) {
+        title = 'You have rewards ready';
+        copy = `${snapshot.claimableQuests} quest${snapshot.claimableQuests === 1 ? '' : 's'} can be claimed right now. Cash them in before your next match.`;
+    } else if (snapshot.activeEvents > 0) {
+        title = 'Live bonuses are active';
+        copy = `${snapshot.activeEvents} event${snapshot.activeEvents === 1 ? '' : 's'} are boosting the arena. It is a strong time to queue or finish quests.`;
+    } else if (snapshot.nextQuestProgress) {
+        title = 'Next objective';
+        copy = snapshot.nextQuestProgress;
+    }
+
+    return `<section class="menu-activity-focus">` +
+        `<div class="menu-activity-focus-head">` +
+            `<p class="menu-activity-focus-kicker">Recommended next move</p>` +
+            `<h3 class="menu-activity-focus-title">${escapeHtml(title)}</h3>` +
+            `<p class="menu-activity-focus-copy">${escapeHtml(copy)}</p>` +
+        `</div>` +
+        `<div class="menu-activity-focus-grid">` +
+            `<div class="menu-activity-focus-stat"><strong>${snapshot.claimableQuests}</strong><span>Claimable quests</span></div>` +
+            `<div class="menu-activity-focus-stat"><strong>${snapshot.activeEvents}</strong><span>Live events</span></div>` +
+            `<div class="menu-activity-focus-stat"><strong>${snapshot.lumens}</strong><span>Lumens banked</span></div>` +
+        `</div>` +
+    `</section>`;
+}
+
+window.claimQuest = async function(questId, btn) {
+    if (btn) {
+        btn.disabled = true;
+        btn.innerText = '...';
+    }
+    try {
+        const res = await fetch('/claim-quest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, questId })
+        });
+        const contentType = (res.headers.get('content-type') || '').toLowerCase();
+        const data = contentType.includes('application/json')
+            ? await res.json()
+            : { ok: false, error: await res.text() || `Request failed (${res.status})` };
+        if (data.ok) {
+            if (window.sfx) window.sfx.playLevelUp(); // confetti sound equivalent
+            await fetchPlayerProfile(true);
+        } else if (data.error === 'Your account is banned from matchmaking.') {
+            showBannedModal(data.bannedUntil);
+        } else {
+            console.error('Claim failed', data.error);
+            if (btn) {
+                btn.disabled = false;
+                btn.innerText = 'Claim';
+            }
+            alert(data.error || 'Could not claim quest right now.');
+        }
+    } catch (e) {
+        console.error('Claim error', e);
+        if (btn) {
+            btn.disabled = false;
+            btn.innerText = 'Claim';
+        }
+        alert('Could not claim quest right now.');
+    }
+};
+
+function renderQuestActivitySection() {
+    const p = playerProfileData;
+    if (!p || !p.questCatalog || !p.questMetrics) return '';
+    const dm = p.questMetrics.daily || {};
+    const wm = p.questMetrics.weekly || {};
+    const rows = [];
+    const orderedQuests = [...p.questCatalog].sort((a, b) => {
+        const aBucket = a.slot === 'daily' ? dm : wm;
+        const bBucket = b.slot === 'daily' ? dm : wm;
+
+        const metricValue = (bucket, quest) => {
+            if (quest.metric === 'wins') return bucket.wins || 0;
+            if (quest.metric === 'damage') return bucket.damage || 0;
+            if (quest.metric === 'abilities') return bucket.abilities || 0;
+            return bucket.matches || 0;
+        };
+
+        const aClaimed = !!(aBucket.claimed && aBucket.claimed[a.id]);
+        const bClaimed = !!(bBucket.claimed && bBucket.claimed[b.id]);
+        const aCur = metricValue(aBucket, a);
+        const bCur = metricValue(bBucket, b);
+        const aDone = aCur >= a.target;
+        const bDone = bCur >= b.target;
+
+        const sortRank = (claimed, done) => {
+            if (!claimed && !done) return 0;
+            if (!claimed && done) return 1;
+            return 2;
+        };
+
+        const rankDiff = sortRank(aClaimed, aDone) - sortRank(bClaimed, bDone);
+        if (rankDiff !== 0) return rankDiff;
+
+        const aPct = aCur / Math.max(1, a.target);
+        const bPct = bCur / Math.max(1, b.target);
+        return bPct - aPct;
+    });
+
+    for (const q of orderedQuests) {
+        const bucket = q.slot === 'daily' ? dm : wm;
+        const claimed = bucket.claimed && bucket.claimed[q.id];
+        let cur = bucket.matches || 0;
+        if (q.metric === 'wins') cur = bucket.wins || 0;
+        else if (q.metric === 'damage') cur = bucket.damage || 0;
+        else if (q.metric === 'abilities') cur = bucket.abilities || 0;
+        const pct = Math.min(100, Math.round((cur / Math.max(1, q.target)) * 100));
+        const done = !!claimed || cur >= q.target;
+        
+        let claimBtnHtml = '';
+        if (claimed) {
+            claimBtnHtml = `<span class="quest-status-claimed">✓ Claimed</span>`;
+        } else if (done) {
+            claimBtnHtml = `<button type="button" class="btn-claim-quest" onclick="claimQuest('${q.id}', this)">Claim</button>`;
+        }
+        
+        rows.push(
+            `<div class="menu-activity-quest"><div class="menu-activity-quest-label">${q.label}<span class="menu-activity-quest-pill">${q.slot}</span></div>` +
+                `<div class="menu-activity-quest-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>` +
+                `<div class="menu-activity-quest-meta" style="display:flex; justify-content:space-between; align-items:center;"><span>${cur} / ${q.target}</span> ${claimBtnHtml}</div></div>`
+        );
+    }
+    return `<div class="menu-activity-quest-block"><h3 class="menu-activity-quest-head">Quests</h3>${rows.join('')}</div>`;
+}
+
 function renderMenuActivityPopoverBody() {
     const body = document.getElementById('menu-activity-popover-body');
     if (!body) return;
-    const data = lastSocialSnapshot;
-    if (!data) {
-        body.innerHTML = '<p class="menu-activity-empty">Loading activity…</p>';
+    const focusBlock = renderMenuFocusSection();
+    const eventsBlock = renderEventsActivitySection();
+    const questBlock = renderQuestActivitySection();
+    const top = (focusBlock || '') + (eventsBlock || '') + (questBlock || '');
+
+    if (!top) {
+        body.innerHTML = '<p class="menu-activity-empty">No active quests or events.</p>';
         return;
     }
-    const reqs = data.requests || [];
-    const duels = data.duelInvites || [];
-    if (reqs.length === 0 && duels.length === 0) {
-        body.innerHTML = '<p class="menu-activity-empty">No friend requests or duel invites right now.</p>';
-        return;
-    }
-    let html = '';
-    const bits = [];
-    if (reqs.length > 0) {
-        bits.push(`${reqs.length} friend request${reqs.length > 1 ? 's' : ''}`);
-    }
-    if (duels.length > 0) {
-        bits.push(`${duels.length} duel invite${duels.length > 1 ? 's' : ''}`);
-    }
-    body.innerHTML = `<button type="button" class="menu-activity-item">${bits.join(' · ')} — Open Social</button>`;
+    body.innerHTML = top;
 }
 
 function closeMenuActivityPopover() {
     menuActivityPopoverOpen = false;
-    const pop = document.getElementById('menu-activity-popover');
-    if (pop) pop.classList.add('hidden');
-    const b = document.getElementById('btn-menu-activity');
-    if (b) b.setAttribute('aria-expanded', 'false');
 }
 
 function openMenuActivityPopover() {
     menuActivityPopoverOpen = true;
-    const pop = document.getElementById('menu-activity-popover');
-    if (pop) pop.classList.remove('hidden');
-    const b = document.getElementById('btn-menu-activity');
-    if (b) b.setAttribute('aria-expanded', 'true');
-    renderMenuActivityPopoverBody();
-    fetchFriends(true);
 }
 
 async function fetchPlayerProfile(silent = false) {
@@ -597,12 +908,28 @@ async function fetchPlayerProfile(silent = false) {
         const res = await fetch(`/profile?uid=${localUid}`);
         const data = await res.json();
         playerProfileData = data;
+        if (data.bpPremiumUnlocked) setBpPremiumUnlocked(true);
         myUsername = data.username || 'Player';
         
         document.getElementById('profile-username').innerText = myUsername;
         document.getElementById('profile-level').innerText = data.level; // Account rank (from class levels)
+        
+        const rPlacements = data.rankedRecord ? data.rankedRecord.placements : 0;
+        const rMmr = data.rankedRecord ? data.rankedRecord.mmr : 1000;
+        let rTier = `Unranked (${rPlacements}/5)`;
+        if (rPlacements >= 5) {
+            if (rMmr < 1150) rTier = `Bronze (${rMmr})`;
+            else if (rMmr < 1300) rTier = `Silver (${rMmr})`;
+            else if (rMmr < 1500) rTier = `Gold (${rMmr})`;
+            else if (rMmr < 1850) rTier = `Platinum (${rMmr})`;
+            else rTier = `Diamond (${rMmr})`;
+        }
+        document.getElementById('profile-ranked-tier').innerText = rTier;
+
         document.getElementById('profile-wins').innerText = data.wins;
         document.getElementById('profile-losses').innerText = data.losses;
+        document.getElementById('profile-guild-name').innerText = data.guild ? `[${data.guild.tag}] ${data.guild.name}` : 'No guild';
+        document.getElementById('btn-profile-leave-guild')?.classList.toggle('hidden', !data.guild);
 
         const roster = sumRosterXpProgress(data.classes);
         document.getElementById('profile-xp-fill').style.width = `${roster.pct}%`;
@@ -616,7 +943,40 @@ async function fetchPlayerProfile(silent = false) {
 
         // Render match history
         updateMatchHistoryUI(data.matchHistory);
-    } catch (e) { console.error('Profile fetch failed', e); }
+
+        fillProfileTitleSelect();
+
+        renderMenuActivityPopoverBody();
+        
+        if (data.banned) {
+            showBannedModal(data.bannedUntil);
+        } else {
+            const modal = document.getElementById('banned-modal');
+            if (modal) modal.classList.add('hidden');
+        }
+    } catch (e) {
+        console.error('Profile fetch failed', e);
+        syncMainMenuHeaderProfile({ username: myUsername || 'Player', level: 1 });
+    }
+}
+
+function fillProfileTitleSelect() {
+    const titleSelect = document.getElementById('profile-select-title');
+    if (!titleSelect || !playerProfileData) return;
+    const current = titleSelect.value;
+    titleSelect.innerHTML = '<option value="">No Title</option>';
+    (playerProfileData.unlockedTitles || []).forEach(title => {
+        const opt = document.createElement('option');
+        opt.value = title;
+        opt.innerText = title;
+        titleSelect.appendChild(opt);
+    });
+    const equip = playerProfileData.equippedTitle || '';
+    if (equip && [...titleSelect.options].some(o => o.value === equip)) {
+        titleSelect.value = equip;
+    } else if (current && [...titleSelect.options].some(o => o.value === current)) {
+        titleSelect.value = current;
+    }
 }
 
 function updateMatchHistoryUI(history) {
@@ -644,8 +1004,23 @@ function updateProfileUI(data) {
     myUsername = data.username || 'Player';
     document.getElementById('profile-username').innerText = myUsername;
     document.getElementById('profile-level').innerText = data.level;
+    
+    const rPlacements = data.rankedRecord ? data.rankedRecord.placements : 0;
+    const rMmr = data.rankedRecord ? data.rankedRecord.mmr : 1000;
+    let rTier = `Unranked (${rPlacements}/5)`;
+    if (rPlacements >= 5) {
+        if (rMmr < 1150) rTier = `Bronze (${rMmr})`;
+        else if (rMmr < 1300) rTier = `Silver (${rMmr})`;
+        else if (rMmr < 1500) rTier = `Gold (${rMmr})`;
+        else if (rMmr < 1850) rTier = `Platinum (${rMmr})`;
+        else rTier = `Diamond (${rMmr})`;
+    }
+    document.getElementById('profile-ranked-tier').innerText = rTier;
+
     document.getElementById('profile-wins').innerText = data.wins;
     document.getElementById('profile-losses').innerText = data.losses;
+    document.getElementById('profile-guild-name').innerText = data.guild ? `[${data.guild.tag}] ${data.guild.name}` : 'No guild';
+    document.getElementById('btn-profile-leave-guild')?.classList.toggle('hidden', !data.guild);
 
     const roster = sumRosterXpProgress(data.classes);
     document.getElementById('profile-xp-fill').style.width = `${roster.pct}%`;
@@ -675,6 +1050,45 @@ const CHARACTER_CLASSES = [
     { id: 'lumenSage', name: 'Sage', hp: 80, atk: 25, stats: 'Mage Class<br>Low Health / High Burst' },
     { id: 'voidWeaver', name: 'Void Weaver', hp: 110, atk: 18, stats: 'Assassin Class<br>Medium Health / High Speed' }
 ];
+
+const MENU_CHARACTER_SPOTLIGHT = {
+    aegisKnight: {
+        hook: 'Anchor the front line and force every duel to happen on your terms.',
+        pressure: 'Frontline control'
+    },
+    lumenSage: {
+        hook: 'Burst windows, precision timing, and huge punish potential define this pick.',
+        pressure: 'Burst caster'
+    },
+    voidWeaver: {
+        hook: 'Slip through the fight, collapse on openings, and punish hesitation instantly.',
+        pressure: 'Skirmish threat'
+    }
+};
+
+const HERO_SELECT_METADATA = {
+    aegisKnight: {
+        icon: '🛡️',
+        role: 'Tank',
+        tagline: 'Reliable frontline captain',
+        hook: 'Lead the front line with durable pressure and force every duel into your tempo.',
+        desc: 'Tank · High HP'
+    },
+    lumenSage: {
+        icon: '✨',
+        role: 'Mage',
+        tagline: 'Burst specialist',
+        hook: 'Explode burst windows, punish mistakes, and swing fights with raw spell damage.',
+        desc: 'Mage · Burst Damage'
+    },
+    voidWeaver: {
+        icon: '🕳️',
+        role: 'Assassin',
+        tagline: 'Execution-focused diver',
+        hook: 'Slip through openings, collapse fast, and pressure fragile targets before they recover.',
+        desc: 'Assassin · Agile'
+    }
+};
 let selectedCharacterIndex = 0;
 let playerProfileData = null; // Full data from backend
 fetchPlayerProfile();
@@ -684,13 +1098,114 @@ let currentPreviewCharId = 'aegisKnight';
 let currentSkinIndex = 0;
 
 const BP_REWARDS = {
+    1: { type: 'title', id: 'recruit', name: 'Recruit' },
     2: { type: 'emote', id: 'hype', name: '🎈 Hype' },
     3: { type: 'skin', id: 'verdant', name: 'Verdant' },
+    4: { type: 'credits', id: 'lumens', amount: 20, name: '+20 Lumens' },
     5: { type: 'title', id: 'warrior', name: 'Warrior' },
+    6: { type: 'skin', id: 'crimson_knight', name: 'Crimson Knight' },
+    7: { type: 'credits', id: 'lumens', amount: 20, name: '+20 Lumens' },
+    8: { type: 'title', id: 'tactician', name: 'Tactician' },
+    9: { type: 'credits', id: 'lumens', amount: 20, name: '+20 Lumens' },
     10: { type: 'skin', id: 'abyssal', name: 'Abyssal' },
+    11: { type: 'skin', id: 'astral_sage', name: 'Astral Sage' },
+    12: { type: 'credits', id: 'lumens', amount: 20, name: '+20 Lumens' },
+    13: { type: 'title', id: 'arc_warden', name: 'Arc Warden' },
+    14: { type: 'title', id: 'starforged', name: 'Starforged' },
     15: { type: 'title', id: 'grandmaster', name: 'Grandmaster' },
+    16: { type: 'title', id: 'mythbreaker', name: 'Mythbreaker' },
+    17: { type: 'title', id: 'season_vanguard', name: 'Season Vanguard' },
+    18: { type: 'credits', id: 'lumens', amount: 20, name: '+20 Lumens' },
+    19: { type: 'title', id: 'paragon', name: 'Paragon' },
     20: { type: 'skin', id: 'legend', name: 'Lumen Legend' }
 };
+
+const BP_PREMIUM_UNLOCK_COST_LUMENS = 100;
+const BP_PREMIUM_UNLOCK_KEY = 'lumen_clash_bp_premium_unlocked';
+
+function bpPremiumUnlocked() {
+    return localStorage.getItem(BP_PREMIUM_UNLOCK_KEY) === 'on';
+}
+
+function setBpPremiumUnlocked(on) {
+    localStorage.setItem(BP_PREMIUM_UNLOCK_KEY, on ? 'on' : 'off');
+}
+
+function bpLumensEarnedByRank(rank) {
+    const r = Math.max(1, Math.min(20, Number(rank) || 1));
+    let sum = 0;
+    for (let i = 1; i <= r; i++) {
+        const rw = BP_REWARDS[i];
+        if (rw && rw.type === 'credits' && rw.id === 'lumens') {
+            sum += Math.max(0, Number(rw.amount) || 0);
+        }
+    }
+    return sum;
+}
+
+function battlePassRewardPresentation(reward, level) {
+    if (!reward && level === 1) {
+        return { icon: '🌱', name: 'Start', desc: 'Your first step on the seasonal path.' };
+    }
+    if (!reward) {
+        return { icon: '🔒', name: 'Mystery slot', desc: 'More rewards can be added to future passes.' };
+    }
+    if (reward.type === 'title') {
+        return { icon: '📜', name: reward.name, desc: 'Equip a new player title to show off your progression.' };
+    }
+    if (reward.type === 'credits') {
+        return { icon: '💠', name: reward.name, desc: 'Bank more lumens for premium unlocks, cosmetics, and future offerings.' };
+    }
+    if (reward.type === 'emote') {
+        return { icon: reward.id === 'hype' ? '🎈' : reward.id, name: reward.name, desc: 'Add a little more personality to your in-match reactions.' };
+    }
+    return { icon: '🎨', name: reward.name, desc: 'Unlock a cosmetic look for your roster.' };
+}
+
+function textureKeyForClassAndSkin(classId, skinLabel) {
+    if (classId === 'voidWeaver') {
+        if (skinLabel === 'Verdant') return 'voidWeaver_green';
+        if (skinLabel === 'Abyssal') return 'voidWeaver_abyssal';
+        if (skinLabel === 'Lumen Legend') return 'voidWeaver_legend';
+        return 'voidWeaver';
+    }
+    if (classId === 'aegisKnight') {
+        if (skinLabel === 'Crimson') return 'aegisKnight_crimson';
+        return 'aegisKnight';
+    }
+    if (classId === 'lumenSage') {
+        if (skinLabel === 'Astral') return 'lumenSage_astral';
+        return 'lumenSage';
+    }
+    return classId;
+}
+
+function getAllSkinsForChar(charId) {
+    const skins = [{ name: 'Default', reqItem: null, reqLevel: 0 }];
+    if (charId === 'voidWeaver') {
+        skins.push({ name: 'Verdant', reqItem: null, reqLevel: 3 });
+        skins.push({ name: 'Abyssal', reqItem: null, reqLevel: 10 });
+        skins.push({ name: 'Lumen Legend', reqItem: null, reqLevel: 20 });
+        skins.push({ name: 'Gold', reqItem: 'Gold', reqLevel: 0 });
+    }
+    if (charId === 'aegisKnight') {
+        skins.push({ name: 'Crimson', reqItem: null, reqLevel: 6 });
+    }
+    if (charId === 'lumenSage') {
+        skins.push({ name: 'Astral', reqItem: null, reqLevel: 11 });
+    }
+    return skins;
+}
+
+function availableSkinsForChar(charId, accountRank) {
+    const r = Math.max(1, Number(accountRank) || 1);
+    const all = getAllSkinsForChar(charId);
+    return all.filter(s => {
+        if (s.reqLevel > r) return false;
+        if (s.reqItem && !(playerProfileData && playerProfileData.unlockedCosmetics && playerProfileData.unlockedCosmetics.includes(s.reqItem))) return false;
+        return true;
+    }).map(s => s.name);
+}
 
 /** Sum of (class xp) / sum of (level×100) — matches how ranks grow from class levels, not lifetime stats.xp */
 function sumRosterXpProgress(classes) {
@@ -723,7 +1238,25 @@ function rosterPctAfterSubtractingClassXp(pg, classId, delta) {
 
 /** RGB max channel at or below this → alpha 0 (removes flat black / dark matte backdrops on PNGs). */
 const CHAR_BITMAP_NEAR_BLACK_THRESHOLD = 28;
-const CHARACTER_TEXTURE_KEYS_FOR_KNOCKOUT = ['voidWeaver', 'voidWeaver_green', 'aegisKnight', 'lumenSage'];
+const CHARACTER_TEXTURE_KEYS_FOR_KNOCKOUT = [
+    'voidWeaver',
+    'voidWeaver_green',
+    'voidWeaver_abyssal',
+    'voidWeaver_legend',
+    'aegisKnight',
+    'aegisKnight_crimson',
+    'lumenSage',
+    'lumenSage_astral'
+];
+
+/** Variant texture keys → base key (for matching on-screen scale when PNG dimensions differ). */
+const VARIANT_TEXTURE_BASE = {
+    voidWeaver_green: 'voidWeaver',
+    voidWeaver_abyssal: 'voidWeaver',
+    voidWeaver_legend: 'voidWeaver',
+    aegisKnight_crimson: 'aegisKnight',
+    lumenSage_astral: 'lumenSage'
+};
 
 const characterPreviewImageCache = Object.create(null);
 
@@ -756,19 +1289,18 @@ function getTextureSourceImage(texture) {
     return s0 && s0.image ? s0.image : null;
 }
 
-/** void_weaver_green.png is often exported at a different resolution than void_weaver.png */
-function voidWeaverTextureScaleFactor(scene, textureKey) {
-    if (textureKey !== 'voidWeaver_green') return 1;
-    if (!scene || !scene.textures.exists('voidWeaver') || !scene.textures.exists('voidWeaver_green')) return 1;
-    const base = getTextureSourceImage(scene.textures.get('voidWeaver'));
-    const grn = getTextureSourceImage(scene.textures.get('voidWeaver_green'));
-    if (!base || !grn) return 1;
-    const bw = base.naturalWidth || base.width;
-    const bh = base.naturalHeight || base.height;
-    const gw = grn.naturalWidth || grn.width;
-    const gh = grn.naturalHeight || grn.height;
-    if (!bw || !bh || !gw || !gh) return 1;
-    return Math.min(bw / gw, bh / gh);
+function spriteVariantScaleFactor(scene, textureKey) {
+    const baseKey = VARIANT_TEXTURE_BASE[textureKey];
+    if (!baseKey || !scene || !scene.textures.exists(baseKey) || !scene.textures.exists(textureKey)) return 1;
+    const baseImg = getTextureSourceImage(scene.textures.get(baseKey));
+    const varImg = getTextureSourceImage(scene.textures.get(textureKey));
+    if (!baseImg || !varImg) return 1;
+    const bw = baseImg.naturalWidth || baseImg.width;
+    const bh = baseImg.naturalHeight || baseImg.height;
+    const vw = varImg.naturalWidth || varImg.width;
+    const vh = varImg.naturalHeight || varImg.height;
+    if (!bw || !bh || !vw || !vh) return 1;
+    return Math.min(bw / vw, bh / vh);
 }
 
 function computePhaserSpriteBaseScales() {
@@ -793,10 +1325,10 @@ function applyPhaserCharacterScales(scene) {
     const cfg = computePhaserSpriteBaseScales();
     if (!cfg) return;
     if (cfg.inBattle) {
-        playerLeftShape.setScale(cfg.leftBase * voidWeaverTextureScaleFactor(scene, playerLeftShape.texture.key)).setFlipX(false);
-        playerRightShape.setScale(cfg.rightBase * voidWeaverTextureScaleFactor(scene, playerRightShape.texture.key)).setFlipX(true);
+        playerLeftShape.setScale(cfg.leftBase * spriteVariantScaleFactor(scene, playerLeftShape.texture.key)).setFlipX(false);
+        playerRightShape.setScale(cfg.rightBase * spriteVariantScaleFactor(scene, playerRightShape.texture.key)).setFlipX(true);
     } else {
-        playerLeftShape.setScale(cfg.leftBase * voidWeaverTextureScaleFactor(scene, playerLeftShape.texture.key)).setFlipX(false);
+        playerLeftShape.setScale(cfg.leftBase * spriteVariantScaleFactor(scene, playerLeftShape.texture.key)).setFlipX(false);
     }
 }
 
@@ -821,6 +1353,18 @@ function applyCharacterTextureAlphaKnockout(scene) {
 function characterPreviewAssetUrl(charId, skinLabel) {
     if (charId === 'voidWeaver' && skinLabel === 'Verdant') {
         return 'assets/void_weaver_green.png?v=1';
+    }
+    if (charId === 'voidWeaver' && skinLabel === 'Abyssal') {
+        return 'assets/void_weaver_abyssal.png?v=1';
+    }
+    if (charId === 'voidWeaver' && skinLabel === 'Lumen Legend') {
+        return 'assets/void_weaver_legend.png?v=1';
+    }
+    if (charId === 'aegisKnight' && skinLabel === 'Crimson') {
+        return 'assets/aegis_knight_crimson.png?v=1';
+    }
+    if (charId === 'lumenSage' && skinLabel === 'Astral') {
+        return 'assets/lumen_sage_astral.png?v=1';
     }
     const base = charId === 'aegisKnight' ? 'aegis_knight' : charId === 'lumenSage' ? 'lumen_sage' : 'void_weaver';
     return `assets/${base}.png?v=2`;
@@ -864,18 +1408,24 @@ function mountPreviewImg(container, dataUrl) {
 function preload() {
     this.load.image('voidWeaver', 'assets/void_weaver.png?v=2');
     this.load.image('voidWeaver_green', 'assets/void_weaver_green.png?v=1');
+    this.load.image('voidWeaver_abyssal', 'assets/void_weaver_abyssal.png?v=1');
+    this.load.image('voidWeaver_legend', 'assets/void_weaver_legend.png?v=1');
     this.load.image('aegisKnight', 'assets/aegis_knight.png?v=2');
     this.load.image('lumenSage', 'assets/lumen_sage.png?v=2');
+    this.load.image('aegisKnight_crimson', 'assets/aegis_knight_crimson.png?v=1');
+    this.load.image('lumenSage_astral', 'assets/lumen_sage_astral.png?v=1');
 }
 
 let playerLeftShape;
 let playerRightShape;
+let playerLeftShape2;  // 2v2 ally
+let playerRightShape2; // 2v2 enemy 2
 let phaserLayoutBattleMode = false;
 
 function menuHeroTextureKey(charId) {
     let key = charId;
     const skin = playerProfileData && playerProfileData.equippedSkins && playerProfileData.equippedSkins[charId];
-    if (skin === 'Verdant' && charId === 'voidWeaver') key = 'voidWeaver_green';
+    key = textureKeyForClassAndSkin(charId, skin || 'Default');
     return key;
 }
 
@@ -895,12 +1445,29 @@ function refreshPhaserCharacterLayout() {
     if (inBattle) {
         playerRightShape.setVisible(true);
         const spriteY = ch * 0.35;
-        playerLeftShape.setPosition(cw * 0.25, spriteY);
-        playerRightShape.setPosition(cw * 0.75, spriteY);
+        playerLeftShape.setPosition(cw * 0.22, spriteY);
+        playerRightShape.setPosition(cw * 0.78, spriteY);
+        
+        // 2v2 secondary sprites — staggered behind primaries
+        if (playerLeftShape2 && playerRightShape2) {
+            const has4 = gameState && gameState.players && Object.keys(gameState.players).length > 2;
+            playerLeftShape2.setVisible(has4);
+            playerRightShape2.setVisible(has4);
+            if (has4) {
+                playerLeftShape2.setPosition(cw * 0.12, spriteY + ch * 0.08);
+                playerRightShape2.setPosition(cw * 0.88, spriteY + ch * 0.08);
+                playerLeftShape2.setScale(playerLeftShape.scaleX * 0.8, playerLeftShape.scaleY * 0.8);
+                playerRightShape2.setScale(playerRightShape.scaleX * 0.8, playerRightShape.scaleY * 0.8);
+                playerLeftShape2.setAlpha(0.85);
+                playerRightShape2.setAlpha(0.85);
+            }
+        }
     } else {
         playerRightShape.setVisible(false);
+        if (playerLeftShape2) playerLeftShape2.setVisible(false);
+        if (playerRightShape2) playerRightShape2.setVisible(false);
         const narrowPortrait = document.documentElement.classList.contains('layout-portrait') && cw < 900;
-        const spriteX = narrowPortrait ? cw * 0.5 : cw * 0.4;
+        const spriteX = cw * 0.5; // Centered
         const spriteY = narrowPortrait ? ch * 0.34 : ch * 0.4;
         playerLeftShape.setPosition(spriteX, spriteY);
     }
@@ -936,14 +1503,19 @@ function create() {
     const startTex = menuHeroTextureKey(startCharId);
 
     playerLeftShape = this.add.sprite(cw * 0.4, ch * 0.4, startTex);
-
     playerRightShape = this.add.sprite(cw * 0.75, ch * 0.35, 'voidWeaver');
+    playerRightShape.setFlipX(true);
+    playerLeftShape2 = this.add.sprite(cw * 0.15, ch * 0.45, 'aegisKnight');
+    playerRightShape2 = this.add.sprite(cw * 0.85, ch * 0.45, 'voidWeaver');
+    playerRightShape2.setFlipX(true);
+    playerLeftShape2.setVisible(false);
+    playerRightShape2.setVisible(false);
 
     refreshPhaserCharacterLayout();
 
     // Tweens for idle breathing effect
     this.tweens.add({
-        targets: [playerLeftShape, playerRightShape],
+        targets: [playerLeftShape, playerRightShape, playerLeftShape2, playerRightShape2],
         y: '-=15',
         duration: 2000,
         yoyo: true,
@@ -952,6 +1524,10 @@ function create() {
     });
 
     // Connection is now triggered by the "Play" button, not on create()
+    syncGameContainerPointerEvents();
+    
+    // Final sync: ensure sprites match latest server state if match already started
+    if (typeof updateUI === 'function') updateUI();
 }
 
 function update() {
@@ -977,9 +1553,153 @@ function clearReconnectTimer() {
     reconnectTimer = null;
 }
 
+function clearHeroSelectCountdownTimer() {
+    if (!heroSelectCountdownTimer) return;
+    clearInterval(heroSelectCountdownTimer);
+    heroSelectCountdownTimer = null;
+}
+
+function availableSkinsByHeroId(charId) {
+    return availableSkinsForChar(charId, playerProfileData && playerProfileData.level ? playerProfileData.level : 1);
+}
+
+function setHeroSelectSkinOptions(charId, preferredSkin) {
+    const select = document.getElementById('hero-select-skin');
+    if (!select) return;
+    const skins = availableSkinsByHeroId(charId);
+    select.innerHTML = '';
+    skins.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s;
+        opt.innerText = s;
+        select.appendChild(opt);
+    });
+    const fallback = skins.includes('Default') ? 'Default' : (skins[0] || 'Default');
+    select.value = preferredSkin && skins.includes(preferredSkin) ? preferredSkin : fallback;
+}
+
+function updateHeroSelectCardClasses(charId) {
+    document.querySelectorAll('.hero-select-card').forEach(card => {
+        card.classList.toggle('active', card.getAttribute('data-hero-select') === charId);
+    });
+}
+
+function syncHeroSelectFeature(charId) {
+    const hero = CHARACTER_CLASSES.find((c) => c.id === charId) || CHARACTER_CLASSES[0];
+    if (!hero) return;
+    const meta = HERO_SELECT_METADATA[hero.id] || {};
+    const iconEl = document.getElementById('hero-select-feature-icon');
+    const roleEl = document.getElementById('hero-select-feature-role');
+    const nameEl = document.getElementById('hero-select-feature-name');
+    const taglineEl = document.getElementById('hero-select-feature-tagline');
+    const hookEl = document.getElementById('hero-select-feature-hook');
+    const hpEl = document.getElementById('hero-select-feature-hp');
+    const atkEl = document.getElementById('hero-select-feature-atk');
+    const descEl = document.getElementById('hero-select-feature-desc');
+    if (iconEl) iconEl.textContent = meta.icon || '⚔️';
+    if (roleEl) roleEl.textContent = meta.role || 'Hero';
+    if (nameEl) nameEl.textContent = hero.name;
+    if (taglineEl) taglineEl.textContent = meta.tagline || meta.role || 'Arena specialist';
+    if (hookEl) hookEl.textContent = meta.hook || 'Lock your combatant and get ready to commit.';
+    if (hpEl) hpEl.textContent = String(hero.hp || 0);
+    if (atkEl) atkEl.textContent = String(hero.atk || 0);
+    if (descEl) descEl.textContent = meta.desc || String(hero.stats || '').replace(/<br>/g, ' · ');
+}
+
+function extractHeroSelectServerState() {
+    const hs = gameState && gameState.heroSelect;
+    if (!hs) return null;
+    const me = myPlayerId || 'p1';
+    const opp = me === 'p1' ? 'p2' : 'p1';
+    const players = hs.players || {};
+    const meRow = players[me] || {};
+    const oppRow = players[opp] || {};
+    return {
+        meChar: meRow.charId || null,
+        meSkin: meRow.skin || 'Default',
+        meReady: !!meRow.ready,
+        oppReady: !!oppRow.ready,
+        deadline: Number(hs.deadline) || 0
+    };
+}
+
+function syncHeroSelectUIFromState() {
+    const overlay = document.getElementById('hero-select-overlay');
+    const countdown = document.getElementById('hero-select-countdown');
+    const readyStatus = document.getElementById('hero-ready-status');
+    const oppStatus = document.getElementById('hero-opponent-ready-status');
+    const readyBtn = document.getElementById('btn-hero-ready');
+    const phasePill = document.getElementById('hero-select-phase-pill');
+    const selectionSummary = document.getElementById('hero-select-selection-summary');
+    const skinNote = document.getElementById('hero-select-skin-note');
+    const lockCopy = document.getElementById('hero-select-lock-copy');
+    if (!overlay || !countdown || !readyStatus || !oppStatus || !readyBtn) return;
+
+    const server = extractHeroSelectServerState();
+    const effective = server || {
+        meChar: heroSelectPick.charId,
+        meSkin: heroSelectPick.skin || 'Default',
+        meReady: heroSelectLocked,
+        oppReady: false,
+        deadline: 0
+    };
+
+    const fallbackChar = CHARACTER_CLASSES[selectedCharacterIndex] ? CHARACTER_CLASSES[selectedCharacterIndex].id : 'aegisKnight';
+    const charId = effective.meChar || heroSelectPick.charId || fallbackChar;
+    const skin = effective.meSkin || heroSelectPick.skin || 'Default';
+
+    heroSelectPick.charId = charId;
+    heroSelectPick.skin = skin;
+    heroSelectLocked = !!effective.meReady;
+
+    updateHeroSelectCardClasses(charId);
+    syncHeroSelectFeature(charId);
+    setHeroSelectSkinOptions(charId, skin);
+    const hero = CHARACTER_CLASSES.find((c) => c.id === charId) || CHARACTER_CLASSES[0];
+    const skins = availableSkinsByHeroId(charId);
+    const unlockedExtras = Math.max(0, skins.length - 1);
+
+    readyStatus.innerText = heroSelectLocked ? 'Locked in' : 'Not ready';
+    oppStatus.innerText = effective.oppReady ? 'Opponent locked in' : 'Opponent selecting...';
+    readyBtn.disabled = heroSelectLocked;
+    readyBtn.innerText = heroSelectLocked ? 'Locked' : 'Lock In';
+    if (phasePill) {
+        phasePill.textContent = heroSelectLocked ? 'Locked' : 'Selecting';
+        phasePill.classList.toggle('is-locked', heroSelectLocked);
+    }
+    if (selectionSummary) {
+        selectionSummary.textContent = `Previewing ${hero ? hero.name : 'your hero'} with the ${skin} skin.`;
+    }
+    if (skinNote) {
+        skinNote.textContent = unlockedExtras > 0
+            ? `${skins.length} skins unlocked for this hero. ${skin} is currently equipped.`
+            : `${skin} skin equipped. Unlock more looks by leveling your roster.`;
+    }
+    if (lockCopy) {
+        lockCopy.textContent = heroSelectLocked
+            ? 'Selection sent. Waiting for the final confirmation from the server.'
+            : (effective.oppReady ? 'Opponent is ready. Lock in to avoid a last-second scramble.' : 'Lock now to secure your loadout.');
+    }
+
+    if (effective.deadline > Date.now()) {
+        heroSelectCountdownUntil = effective.deadline;
+        clearHeroSelectCountdownTimer();
+        const tick = () => {
+            const ms = Math.max(0, heroSelectCountdownUntil - Date.now());
+            countdown.innerText = ms > 0 ? `Lock in your hero (${Math.ceil(ms / 1000)}s)` : 'Waiting for server...';
+        };
+        tick();
+        heroSelectCountdownTimer = setInterval(tick, 200);
+    } else {
+        clearHeroSelectCountdownTimer();
+        countdown.innerText = 'Lock in your hero';
+    }
+    reportPresenceIfChanged(true);
+}
+
 function scheduleReconnect() {
     if (manualSocketClose) return;
-    const inMatchFlow = gameState && (gameState.status === 'IN_PROGRESS' || gameState.status === 'WAITING_FOR_PLAYERS');
+    const inMatchFlow = gameState && (gameState.status === 'IN_PROGRESS' || gameState.status === 'WAITING_FOR_PLAYERS' || gameState.status === 'HERO_SELECT');
     if (!inMatchFlow) return;
     if (reconnectAttempts >= 3) {
         document.getElementById('matchmaking-text').innerText = "Connection lost. Please return to menu.";
@@ -994,11 +1714,13 @@ function scheduleReconnect() {
     document.getElementById('matchmaking-text').innerText = `Reconnecting... (${reconnectAttempts}/3)`;
     clearReconnectTimer();
     reconnectTimer = setTimeout(() => {
-        connectWebSocket(lastRoomId);
+        connectWebSocket(lastRoomId, lastQueueType);
     }, delayMs);
 }
 
-function connectWebSocket(specificRoomId = null) {
+let lastQueueType = 'casual';
+
+function connectWebSocket(specificRoomId = null, queue = 'casual') {
     if (socket) {
         manualSocketClose = true;
         try {
@@ -1008,13 +1730,34 @@ function connectWebSocket(specificRoomId = null) {
     }
     manualSocketClose = false;
     if (specificRoomId) lastRoomId = specificRoomId;
-    // Append chosen character class
-    const charId = CHARACTER_CLASSES[selectedCharacterIndex].id;
+    // Server requires explicit hero (no default); prefer in-match pick over menu-only default.
+    const menuChar = CHARACTER_CLASSES[selectedCharacterIndex] ? CHARACTER_CLASSES[selectedCharacterIndex].id : null;
+    const charId = heroSelectPick.charId || menuChar;
+    if (!charId) {
+        console.warn('connectWebSocket: no hero');
+        const mm = document.getElementById('matchmaking-text');
+        if (mm) mm.innerText = 'Pick a hero before joining.';
+        return;
+    }
+
+    if (playerProfileData && playerProfileData.banned) {
+        showBannedModal(playerProfileData.bannedUntil);
+        document.getElementById('matchmaking-overlay').classList.add('hidden');
+        return;
+    }
+    heroSelectPick.charId = charId;
+    if (!heroSelectPick.skin) heroSelectPick.skin = 'Default';
+    const skin = heroSelectPick.skin || 'Default';
     persistLastSelectedCharacterId(charId);
     // Connect to Node.js proxy to bypass Firewall issues on Windows
-    let wsUrl = `ws://${window.location.hostname}:8083/play?char=${charId}&uid=${localUid}`;
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    let wsUrl = `${wsProtocol}//${window.location.host}/play?char=${encodeURIComponent(charId)}&uid=${encodeURIComponent(localUid)}&skin=${encodeURIComponent(skin)}`;
+    
+    lastQueueType = queue;
+    wsUrl += `&queue=${queue}`;
+
     if (specificRoomId) {
-        wsUrl += `&roomId=${specificRoomId}`;
+        wsUrl += `&roomId=${encodeURIComponent(specificRoomId)}`;
     }
     socket = new WebSocket(wsUrl);
 
@@ -1037,7 +1780,14 @@ function connectWebSocket(specificRoomId = null) {
                 prevOpponentHealth = -1;
             }
             gameState = msg.state;
+            // Always sync whenever a state arrives to prevent sprite mismatches
             updateUI();
+        }
+        if (msg.type === 'HERO_SELECT_UPDATE') {
+            if (gameState && msg.heroSelect) {
+                gameState.heroSelect = msg.heroSelect;
+            }
+            syncHeroSelectUIFromState();
         }
         if (msg.type === 'EMOTE') {
             showEmoteBubble(msg.pId, msg.emote);
@@ -1077,7 +1827,7 @@ function connectWebSocket(specificRoomId = null) {
         console.log("WebSocket closed", event);
         if (manualSocketClose) return;
         if (event.code === 4000) {
-            connectWebSocket();
+            connectWebSocket(null, lastQueueType || 'casual');
             return;
         }
 
@@ -1128,13 +1878,17 @@ function triggerDamageFeedback(scene, damagedSprite, counterSprite, hurtKickX, c
 }
 
 function updateUI() {
-    if (gameState && gameState.status !== 'GAME_OVER') {
+    if (!gameState) return;
+
+    if (gameState.status !== 'GAME_OVER') {
         hideVictorySplashForActiveMatch();
     }
 
     // Hide Main Menu and ALL modals if game started
     if (gameState.status === 'IN_PROGRESS') {
         document.getElementById('matchmaking-overlay').classList.add('hidden');
+        document.getElementById('hero-select-overlay').classList.add('hidden');
+        clearHeroSelectCountdownTimer();
         document.getElementById('main-menu-container').classList.add('hidden');
         
         // Hide every modal just in case
@@ -1146,67 +1900,158 @@ function updateUI() {
         document.getElementById('ui-container').classList.remove('hidden');
         document.getElementById('emote-bar').classList.remove('hidden');
         renderEmoteBar();
-    } else if (gameState.status === 'WAITING_FOR_PLAYERS' && myPlayerId) {
-        // We connected but are waiting
-        document.getElementById('matchmaking-text').innerText = "Waiting for Opponent...";
+    } else if (gameState.status === 'HERO_SELECT') {
+        document.getElementById('matchmaking-overlay').classList.add('hidden');
         document.getElementById('ui-container').classList.add('hidden');
+        document.getElementById('main-menu-container').classList.add('hidden');
+        document.getElementById('hero-select-overlay').classList.remove('hidden');
+        document.getElementById('emote-bar').classList.add('hidden');
+        syncHeroSelectUIFromState();
+        syncSpritesToLatestPlayers();
+        reportPresenceIfChanged(true);
+    } else if (gameState.status === 'WAITING_FOR_PLAYERS') {
+        document.getElementById('ui-container').classList.add('hidden');
+        
+        if (gameState.isPrivate) {
+            document.getElementById('main-menu-container').classList.add('hidden');
+            document.getElementById('matchmaking-overlay').classList.add('hidden');
+            document.getElementById('hero-select-overlay').classList.remove('hidden');
+            syncHeroSelectUIFromState();
+        } else {
+            // Keep background visible behind the translucent matching screen
+            document.getElementById('main-menu-container').classList.remove('hidden');
+            document.getElementById('hero-select-overlay').classList.add('hidden');
+            document.getElementById('matchmaking-overlay').classList.remove('hidden');
+        }
+        syncSpritesToLatestPlayers();
+        reportPresenceIfChanged(true);
+    } else if (gameState.status !== 'GAME_OVER') {
+        document.getElementById('ui-container').classList.add('hidden');
+        document.getElementById('emote-bar').classList.add('hidden');
     }
 
     // Update Health Bars & Animations
     if (gameState.status === 'IN_PROGRESS' && myPlayerId) {
         if (!matchStats.active) resetMatchStats();
-        const opponentId = myPlayerId === 'p1' ? 'p2' : 'p1';
 
-        const myPlayer = gameState.players[myPlayerId];
-        const oppPlayer = gameState.players[opponentId];
-
-        // Self (Left)
-        const myHpPct = (myPlayer.health / myPlayer.maxHealth) * 100;
-        document.getElementById('hp-left').style.width = `${Math.max(0, myHpPct)}%`;
-
-        document.getElementById('name-left').innerText = `${myUsername} (${myPlayer.class})`;
-        if (playerLeftShape && myPlayer.classId) {
-            let textureKey = myPlayer.classId;
-            if (myPlayer.equippedSkin === 'Verdant' && myPlayer.classId === 'voidWeaver') textureKey = 'voidWeaver_green';
-            if (playerLeftShape.active && playerLeftShape.texture.key !== textureKey) {
-                playerLeftShape.setTexture(textureKey);
-                applyPhaserCharacterScales(playerLeftShape.scene);
-            }
+        // Map players to slots depending on team
+        const is2v2 = Object.keys(gameState.players).length > 2;
+        
+        let layoutSlots;
+        if (is2v2) {
+            const isTeamB = myPlayerId === 'p3' || myPlayerId === 'p4';
+            const teamA = ['p1', 'p2'];
+            const teamB = ['p3', 'p4'];
+            const myTeam = isTeamB ? teamB : teamA;
+            const enemyTeam = isTeamB ? teamA : teamB;
+            layoutSlots = {
+                'hud-p1': { id: myTeam[0], isEnemy: false },
+                'hud-p2': { id: myTeam[1], isEnemy: false },
+                'hud-p3': { id: enemyTeam[0], isEnemy: true },
+                'hud-p4': { id: enemyTeam[1], isEnemy: true }
+            };
+        } else {
+            // 1v1: me on left (hud-p1), opponent on right (hud-p3)
+            const oppId = myPlayerId === 'p1' ? 'p2' : 'p1';
+            layoutSlots = {
+                'hud-p1': { id: myPlayerId, isEnemy: false },
+                'hud-p3': { id: oppId, isEnemy: true }
+            };
         }
 
-        if (prevMyHealth !== -1 && myPlayer.health < prevMyHealth && playerLeftShape && playerLeftShape.active && game && game.scene) {
-            matchStats.damageTaken += (prevMyHealth - myPlayer.health);
-            const scene = game.scene.scenes[0];
-            if (scene) {
-                triggerDamageFeedback(scene, playerLeftShape, playerRightShape, '+=10', '-=50');
-            }
-            sfx.playHit();
-        }
-        prevMyHealth = myPlayer.health;
+        let myTeamHealth = 0;
+        let oppTeamHealth = 0;
 
-        // Opponent (Right)
-        const oppHpPct = (oppPlayer.health / oppPlayer.maxHealth) * 100;
-        document.getElementById('hp-right').style.width = `${Math.max(0, oppHpPct)}%`;
-
-        document.getElementById('name-right').innerText = `${oppPlayer.username || 'Opponent'} (${oppPlayer.class})`;
-        if (playerRightShape && oppPlayer.classId) {
-            let textureKey = oppPlayer.classId;
-            if (oppPlayer.equippedSkin === 'Verdant' && oppPlayer.classId === 'voidWeaver') textureKey = 'voidWeaver_green';
-            if (playerRightShape.active && playerRightShape.texture.key !== textureKey) {
-                playerRightShape.setTexture(textureKey);
-                applyPhaserCharacterScales(playerRightShape.scene);
+        for (const [slotId, slotInfo] of Object.entries(layoutSlots)) {
+            const player = gameState.players[slotInfo.id];
+            const hudEl = document.getElementById(slotId);
+            if (!hudEl) continue;
+            
+            if (!player) {
+                hudEl.classList.add('hidden');
+                continue;
             }
-        }
+            hudEl.classList.remove('hidden');
 
-        if (prevOpponentHealth !== -1 && oppPlayer.health < prevOpponentHealth && playerRightShape && playerRightShape.active && game && game.scene) {
-            matchStats.damageDealt += (prevOpponentHealth - oppPlayer.health);
-            const scene = game.scene.scenes[0];
-            if (scene) {
-                triggerDamageFeedback(scene, playerRightShape, playerLeftShape, '-=10', '+=50');
+            const isMe = player.id === myPlayerId;
+            const hpPct = (player.health / player.maxHealth) * 100;
+            const hpEl = document.getElementById(slotId.replace('hud-', 'hp-'));
+            const nameEl = document.getElementById(slotId.replace('hud-', 'name-'));
+            const statusEl = document.getElementById(slotId.replace('hud-', 'status-'));
+
+            if (hpEl) hpEl.style.width = `${Math.max(0, hpPct)}%`;
+            if (nameEl) {
+                let suffix = '';
+                if (isMe) suffix = ' (You)';
+                nameEl.innerText = `${player.username || 'Player'} - ${player.class}${suffix}`;
             }
-            sfx.playHit();
+
+            // Sync Phaser Avatars
+            if (slotId === 'hud-p1' && playerLeftShape && player.classId) {
+                let textureKey = textureKeyForClassAndSkin(player.classId, player.equippedSkin || 'Default');
+                if (playerLeftShape.active && playerLeftShape.texture.key !== textureKey) {
+                    playerLeftShape.setTexture(textureKey);
+                    applyPhaserCharacterScales(playerLeftShape.scene);
+                }
+            } else if (slotId === 'hud-p3' && playerRightShape && player.classId) {
+                let textureKey = textureKeyForClassAndSkin(player.classId, player.equippedSkin || 'Default');
+                if (playerRightShape.active && playerRightShape.texture.key !== textureKey) {
+                    playerRightShape.setTexture(textureKey);
+                    applyPhaserCharacterScales(playerRightShape.scene);
+                }
+            } else if (slotId === 'hud-p2' && playerLeftShape2 && player.classId) {
+                let textureKey = textureKeyForClassAndSkin(player.classId, player.equippedSkin || 'Default');
+                if (playerLeftShape2.active && playerLeftShape2.texture.key !== textureKey) {
+                    playerLeftShape2.setTexture(textureKey);
+                }
+            } else if (slotId === 'hud-p4' && playerRightShape2 && player.classId) {
+                let textureKey = textureKeyForClassAndSkin(player.classId, player.equippedSkin || 'Default');
+                if (playerRightShape2.active && playerRightShape2.texture.key !== textureKey) {
+                    playerRightShape2.setTexture(textureKey);
+                }
+            }
+
+            // Accumulate team health for win/loss
+            if (slotInfo.isEnemy) oppTeamHealth += Math.max(0, player.health);
+            else myTeamHealth += Math.max(0, player.health);
+
+            // Damage Tracking Logic (Frontend Delta)
+            if (matchStats.active) {
+                let prevH = -1;
+                if (slotId === 'hud-p1') prevH = prevMyHealth;
+                else if (slotId === 'hud-p2') prevH = prevTeammateHealth;
+                else if (slotId === 'hud-p3') prevH = prevOpponentHealth;
+                else if (slotId === 'hud-p4') prevH = prevOpponent2Health;
+
+                if (prevH !== -1) {
+                    const diff = prevH - player.health;
+                    if (diff > 0) {
+                        // Someone took damage
+                        if (slotInfo.isEnemy) {
+                            // I (or my team) dealt damage to an enemy
+                            // For simplicity, we credit it to the local player's matchStats if it happened on their turn,
+                            // but usually damage-based quests are individual.
+                            // Server-side tracking is accurate; this is for the live UI/splash fallback.
+                            matchStats.damageDealt += diff;
+                        } else {
+                            // My team took damage
+                            if (isMe) matchStats.damageTaken += diff;
+                        }
+                    }
+                }
+
+                // Update prev values
+                if (slotId === 'hud-p1') prevMyHealth = player.health;
+                else if (slotId === 'hud-p2') prevTeammateHealth = player.health;
+                else if (slotId === 'hud-p3') prevOpponentHealth = player.health;
+                else if (slotId === 'hud-p4') prevOpponent2Health = player.health;
+            }
+
+            // Render status badges
+            statusEl.innerHTML = '';
+            if (player.shield && player.shield.active) statusEl.innerHTML += `<span class="status-badge shield">🛡 ${player.shield.percent}%</span>`;
+            if (player.dodge) statusEl.innerHTML += `<span class="status-badge dodge">⚡ Dodge</span>`;
         }
-        prevOpponentHealth = oppPlayer.health;
 
         if (lastTurnSnapshot !== null && lastTurnSnapshot !== gameState.turn) {
             matchStats.turnSwaps += 1;
@@ -1215,19 +2060,34 @@ function updateUI() {
     }
 
     if (gameState.status === 'WAITING_FOR_PLAYERS') {
-        document.getElementById('status-message').innerText = "Waiting for opponent...";
+        document.getElementById('status-message').innerText = "Waiting for players...";
         document.getElementById('turn-timer').classList.add('hidden');
         document.querySelectorAll('.ability-btn').forEach(b => b.disabled = true);
+    } else if (gameState.status === 'HERO_SELECT') {
+        document.getElementById('status-message').innerText = "Hero Select";
+        document.getElementById('turn-timer').classList.add('hidden');
+        document.getElementById('ability-bar').classList.add('hidden');
+        document.querySelectorAll('.ability-btn').forEach(b => b.disabled = true);
     } else if (gameState.status === 'IN_PROGRESS') {
-        const isMyTurn = (myPlayerId === 'p1' && gameState.turn === 0) || (myPlayerId === 'p2' && gameState.turn === 1);
+        document.getElementById('main-menu-container').classList.add('hidden');
+        document.getElementById('hero-select-overlay').classList.add('hidden');
+        document.getElementById('matchmaking-overlay').classList.add('hidden');
+        document.getElementById('game-container').classList.remove('hidden');
+        document.getElementById('ui-container').classList.remove('hidden');
+        document.getElementById('emote-bar').classList.remove('hidden');
+
+        const is2v2 = Object.keys(gameState.players).length > 2;
+        const myPlayer = gameState.players[myPlayerId];
         
-        document.getElementById('status-message').innerText = isMyTurn ? "Your Turn!" : "Opponent's Turn...";
+        // In 2v2, turns are simultaneous. Everyone can act if alive and haven't acted yet.
+        // Pending actions aren't directly sent to clients yet to prevent peeking, but we can assume 'isMyTurn=true' continuously.
+        const isMyTurn = is2v2 ? (myPlayer && myPlayer.health > 0) : ((myPlayerId === 'p1' && gameState.turn === 0) || (myPlayerId === 'p2' && gameState.turn === 1));
+
+        document.getElementById('status-message').innerText = isMyTurn ? "Your Turn!" : "Waiting...";
         
         document.getElementById('ability-bar').classList.remove('hidden');
         document.getElementById('btn-return').classList.add('hidden');
 
-        // Update ability buttons
-        const myPlayer = gameState.players[myPlayerId];
         if (myPlayer && myPlayer.abilities) {
             document.querySelectorAll('.ability-btn').forEach((btn, i) => {
                 const ab = myPlayer.abilities[i];
@@ -1246,38 +2106,34 @@ function updateUI() {
             });
         }
 
-        // Update status indicators (shield/dodge badges)
-        const oppId = myPlayerId === 'p1' ? 'p2' : 'p1';
-        function renderStatusBadges(player, elId) {
-            const el = document.getElementById(elId);
-            el.innerHTML = '';
-            if (player.shield && player.shield.active) {
-                el.innerHTML += `<span class="status-badge shield">🛡 ${player.shield.percent}%</span>`;
-            }
-            if (player.dodge) {
-                el.innerHTML += `<span class="status-badge dodge">⚡ Dodge</span>`;
-            }
-        }
-        if (myPlayer) renderStatusBadges(myPlayer, 'status-left');
-        if (gameState.players[oppId]) renderStatusBadges(gameState.players[oppId], 'status-right');
-
-        // Turn timer
         if (gameState.turnDeadline) {
             document.getElementById('turn-timer').classList.remove('hidden');
             updateTurnTimer();
         }
 
-        // Highlight active player HUD
-        document.getElementById('hud-left').classList.toggle('active-turn', isMyTurn);
-        document.getElementById('hud-right').classList.toggle('active-turn', !isMyTurn);
+        // Highlight active sides
+        if (!is2v2) {
+            document.getElementById('team-left').classList.toggle('active-turn', isMyTurn);
+            document.getElementById('team-right').classList.toggle('active-turn', !isMyTurn);
+        } else {
+            document.getElementById('team-left').classList.add('active-turn');
+            document.getElementById('team-right').classList.add('active-turn');
+        }
     } else if (gameState.status === 'GAME_OVER') {
         let winnerMsg = "Game Over - Draw";
+        
+        const isTeamB = myPlayerId === 'p3' || myPlayerId === 'p4';
+        const teamA = [gameState.players['p1'], gameState.players['p2']].filter(Boolean);
+        const teamB = [gameState.players['p3'], gameState.players['p4']].filter(Boolean);
+        
+        const myTeamAlive = isTeamB ? teamB.some(p => p.health > 0) : teamA.some(p => p.health > 0);
+        const enemyTeamAlive = isTeamB ? teamA.some(p => p.health > 0) : teamB.some(p => p.health > 0);
+        
+        if (myTeamAlive && !enemyTeamAlive) winnerMsg = "Victory!";
+        else if (!myTeamAlive && enemyTeamAlive) winnerMsg = "Defeat!";
+
         const me = gameState.players[myPlayerId];
-        const opp = gameState.players[myPlayerId === 'p1' ? 'p2' : 'p1'];
-        if (me && opp) {
-            if (me.health > 0 && opp.health <= 0) winnerMsg = "You Win!";
-            if (opp.health > 0 && me.health <= 0) winnerMsg = "You Lose!";
-        }
+        const opp = gameState.players[myPlayerId === 'p1' ? 'p2' : 'p1']; // purely for sounds
 
         document.getElementById('status-message').innerText = winnerMsg;
         document.getElementById('ability-bar').classList.add('hidden');
@@ -1285,15 +2141,16 @@ function updateUI() {
         document.getElementById('turn-timer').classList.add('hidden');
 
         // Trigger XP Splash once
-        if (me && me.postGame && !document.getElementById('xp-splash-overlay').classList.contains('active-showing')) {
-            const won = me.health > 0;
+        const canShowSplash = me && (me.postGame || (winnerMsg !== "Game Over - Draw"));
+        if (canShowSplash && !document.getElementById('xp-splash-overlay').classList.contains('active-showing')) {
+            const won = me && me.health > 0;
             // The active-showing class ensures we only trigger this ONCE per game completion
             document.getElementById('xp-splash-overlay').classList.add('active-showing');
             
             // GO NUCLEAR: Clear game to prevent click interception
             destroyGame();
             
-            showXPSplash(won, me.postGame);
+            showXPSplash(won, me ? me.postGame : null).catch(e => console.error("[Splash] Critical fail", e));
         }
 
         // Play game-over sound once
@@ -1302,7 +2159,7 @@ function updateUI() {
             sfx.playGameOver(iWon);
         }
     } else {
-        // If not game over, ensure splash is hidden (rematch started or quit)
+        // Rematch / odd states: hide splash (hero-select visibility is handled in the first updateUI block only)
         document.getElementById('xp-splash-overlay').classList.add('hidden');
         document.getElementById('xp-splash-overlay').classList.remove('active-showing');
         if (gameState.status !== 'IN_PROGRESS') endMatchStatsSession();
@@ -1351,13 +2208,32 @@ document.getElementById('btn-close-play-mode').addEventListener('click', () => {
     document.getElementById('play-mode-modal').classList.add('hidden');
 });
 
-document.getElementById('btn-quick-match').addEventListener('click', () => {
+function startMatchmaking(queueType) {
+    if (typeof sfx !== 'undefined' && sfx.playClick) sfx.playClick();
     document.getElementById('play-mode-modal').classList.add('hidden');
     document.getElementById('matchmaking-overlay').classList.remove('hidden');
-    document.getElementById('matchmaking-text').innerText = "Connecting to Server...";
+    
+    let mmText = "Finding Match...";
+    if (queueType === '2v2') mmText = "Finding 2v2 Match...";
+    if (queueType === 'ranked') mmText = "Finding Ranked Match...";
+    if (queueType === 'casual') mmText = "Finding 1v1 Match...";
+    document.getElementById('matchmaking-text').innerText = mmText;
+    
     reportPresenceIfChanged(true);
-    connectWebSocket();
-});
+    heroSelectLocked = false;
+    heroSelectCountdownUntil = 0;
+    clearHeroSelectCountdownTimer();
+    const initialChar = CHARACTER_CLASSES[selectedCharacterIndex] ? CHARACTER_CLASSES[selectedCharacterIndex].id : 'aegisKnight';
+    heroSelectPick = { charId: initialChar, skin: 'Default' };
+    setHeroSelectSkinOptions(initialChar, 'Default');
+    updateHeroSelectCardClasses(initialChar);
+    syncHeroSelectFeature(initialChar);
+    connectWebSocket(null, queueType);
+}
+
+document.getElementById('btn-quick-match-1v1').addEventListener('click', () => startMatchmaking('casual'));
+document.getElementById('btn-quick-match-2v2').addEventListener('click', () => startMatchmaking('2v2'));
+document.getElementById('btn-ranked-match').addEventListener('click', () => startMatchmaking('ranked'));
 
 document.getElementById('btn-private-choice').addEventListener('click', () => {
     document.getElementById('play-mode-modal').classList.add('hidden');
@@ -1380,6 +2256,49 @@ document.querySelectorAll('.char-card').forEach(card => {
     });
 });
 
+document.querySelectorAll('.hero-select-card').forEach(card => {
+    card.addEventListener('click', () => {
+        if (heroSelectLocked) return;
+        const charId = card.getAttribute('data-hero-select');
+        heroSelectPick.charId = charId;
+        heroSelectPick.skin = 'Default';
+        updateHeroSelectCardClasses(charId);
+        syncHeroSelectFeature(charId);
+        setHeroSelectSkinOptions(charId, 'Default');
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ action: 'hero-pick', charId, skin: heroSelectPick.skin }));
+        }
+    });
+});
+
+const heroSelectSkinEl = document.getElementById('hero-select-skin');
+if (heroSelectSkinEl) {
+    heroSelectSkinEl.addEventListener('change', () => {
+        if (heroSelectLocked) return;
+        heroSelectPick.skin = heroSelectSkinEl.value || 'Default';
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ action: 'hero-pick', charId: heroSelectPick.charId, skin: heroSelectPick.skin }));
+        }
+    });
+}
+
+const btnHeroReady = document.getElementById('btn-hero-ready');
+if (btnHeroReady) {
+    btnHeroReady.addEventListener('click', () => {
+        if (heroSelectLocked) return;
+        if (!heroSelectPick.charId) return;
+        heroSelectLocked = true;
+        syncHeroSelectUIFromState();
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+                action: 'hero-ready',
+                charId: heroSelectPick.charId,
+                skin: heroSelectPick.skin || 'Default'
+            }));
+        }
+    });
+}
+
 // Customize links inside cards
 document.querySelectorAll('.btn-customize-link').forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -1392,19 +2311,109 @@ document.getElementById('btn-battle-pass').addEventListener('click', () => {
     openBattlePass();
 });
 
+document.getElementById('btn-shop').addEventListener('click', () => {
+    document.getElementById('shop-container').classList.remove('hidden');
+    renderShop();
+    if (typeof sfx !== 'undefined' && sfx.playClick) sfx.playClick();
+});
+
+document.getElementById('btn-close-shop').addEventListener('click', () => {
+    document.getElementById('shop-container').classList.add('hidden');
+    if (typeof sfx !== 'undefined' && sfx.playClick) sfx.playClick();
+});
+
+window.buyShopItem = async function(itemId) {
+    if (typeof sfx !== 'undefined' && sfx.playClick) sfx.playClick();
+    try {
+        const res = await fetch('/shop/purchase', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, itemId })
+        });
+        const data = await res.json();
+        if (data.ok) {
+            playerProfileData = data.stats;
+            renderShop();
+            updateRosterStats();
+        } else {
+            alert("Shop Error: " + data.error);
+        }
+    } catch (e) { console.error(e); }
+};
+
+function renderShop() {
+    const grid = document.getElementById('shop-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    const catalog = playerProfileData && playerProfileData.shopCatalog ? playerProfileData.shopCatalog : [];
+    const lumens = playerProfileData ? playerProfileData.lumens || 0 : 0;
+    
+    document.getElementById('nav-lumen-count').innerText = lumens;
+
+    catalog.forEach(item => {
+        const titleOwned = item.type === 'title' && playerProfileData.unlockedTitles && playerProfileData.unlockedTitles.includes(item.name);
+        const cosmeticOwned = item.type !== 'title' && playerProfileData.unlockedCosmetics && playerProfileData.unlockedCosmetics.includes(item.name);
+        const owned = titleOwned || cosmeticOwned;
+        const canAfford = lumens >= item.price;
+        
+        let icon = '🎁';
+        if (item.type === 'emote') icon = item.name;
+        if (item.type === 'title') icon = '🏅';
+        if (item.type === 'skin') icon = '🎭';
+
+        grid.innerHTML += `
+            <div class="shop-card ${owned ? 'owned' : ''}" style="background: rgba(0,0,0,0.5); padding: 15px; border-radius: 8px; text-align: center; border: 1px solid ${owned ? '#555' : (canAfford ? '#ff00cc' : '#333')}; transition: border 0.3s;">
+                <div style="font-size: 2rem; margin-bottom: 10px;">${icon}</div>
+                <h3 style="font-size: 1.1rem; margin-bottom: 5px; color: ${owned ? '#888' : '#fff'};">${item.name}</h3>
+                <p style="font-size: 0.8rem; color: #aaa; margin-bottom: 15px; text-transform: uppercase;">${item.type}</p>
+                ${owned 
+                    ? `<button disabled class="menu-btn secondary-btn" style="width: 100%; padding: 10px; opacity: 0.5;">Owned</button>` 
+                    : `<button class="menu-btn" style="width: 100%; padding: 10px; background: ${canAfford ? 'linear-gradient(45deg, #ff00cc, #4a00e0)' : '#333'}; color: ${canAfford ? '#fff' : '#888'}; border: none;" onclick="buyShopItem('${item.id}')" ${canAfford ? '' : 'disabled'}>${item.price} L</button>`
+                }
+            </div>
+        `;
+    });
+}
+
 document.getElementById('btn-save-customization').addEventListener('click', () => {
     saveCustomization();
 });
 
+const btnSaveProfileTitle = document.getElementById('btn-save-profile-title');
+if (btnSaveProfileTitle) {
+    btnSaveProfileTitle.addEventListener('click', () => {
+        saveProfileTitle();
+    });
+}
+
 function updateMenuCharacterDisplay() {
     const char = CHARACTER_CLASSES[selectedCharacterIndex];
     if (!char) return;
+    const roleLine = String(char.stats || '').split('<br>')[0] || '';
+    const pressureLine = String(char.stats || '').split('<br>')[1] || '';
+    const roleName = roleLine.replace(/\s*Class\s*$/i, '').trim() || 'Hero';
+    const spotlight = MENU_CHARACTER_SPOTLIGHT[char.id] || {};
     document.getElementById('menu-char-name').innerText = char.name;
     document.getElementById('menu-char-stats').innerHTML = char.stats;
+    const rolePill = document.getElementById('menu-char-role');
+    if (rolePill) rolePill.innerText = roleName;
+    const roleNameEl = document.getElementById('menu-char-role-name');
+    if (roleNameEl) roleNameEl.innerText = roleName;
+    const pressureEl = document.getElementById('menu-char-pressure');
+    if (pressureEl) pressureEl.innerText = spotlight.pressure || pressureLine || 'Flexible pressure';
+    const hookEl = document.getElementById('menu-char-hook');
+    if (hookEl) hookEl.innerText = spotlight.hook || 'Step into the arena with a tuned combat style and sharpened matchup plan.';
+    const hpEl = document.getElementById('menu-char-hp');
+    if (hpEl) hpEl.innerText = String(char.hp || 0);
+    const atkEl = document.getElementById('menu-char-atk');
+    if (atkEl) atkEl.innerText = String(char.atk || 0);
+    const playSelectedEl = document.getElementById('menu-play-selected-hero');
+    if (playSelectedEl) playSelectedEl.innerText = char.name;
 
     if (playerProfileData && playerProfileData.classes[char.id]) {
         const pClass = playerProfileData.classes[char.id];
         document.getElementById('menu-char-name').innerText = `${char.name} (Lv. ${pClass.level})`;
+        if (playSelectedEl) playSelectedEl.innerText = `${char.name} Lv. ${pClass.level}`;
     }
 
     const tex = menuHeroTextureKey(char.id);
@@ -1444,6 +2453,11 @@ updateMenuCharacterDisplay();
 // Update character card levels/xp from profile
 function updateRosterStats() {
     if (!playerProfileData) return;
+    
+    const lCount = document.getElementById('nav-lumen-count');
+    if (lCount) lCount.innerText = playerProfileData.lumens || 0;
+    syncMainMenuStatusWidgets(playerProfileData);
+
     document.querySelectorAll('.char-card').forEach(card => {
         const charId = card.getAttribute('data-char');
         const pClass = playerProfileData.classes[charId] || { level: 1, xp: 0 };
@@ -1509,14 +2523,36 @@ document.getElementById('btn-save-username').addEventListener('click', async () 
     }
 });
 
-// Social Button
-document.getElementById('btn-social').addEventListener('click', () => {
+function syncSocialModalHeader() {
+    const eyebrow = document.getElementById('social-modal-eyebrow');
+    const title = document.getElementById('social-modal-title');
+    const friendsBtn = document.getElementById('btn-friends');
+    const guildBtn = document.getElementById('btn-guild');
+    const onGuild = activeSocialTab === 'guild';
+    if (eyebrow) eyebrow.innerText = onGuild ? 'Guild Network' : 'Friends Network';
+    if (title) title.innerText = onGuild ? 'Guild' : 'Friends';
+    friendsBtn?.classList.toggle('menu-nav-item--active', !onGuild);
+    guildBtn?.classList.toggle('menu-nav-item--active', onGuild);
+}
+
+function openSocialHub(tabName = 'friends') {
     document.getElementById('social-container').classList.remove('hidden');
+    setActiveSocialTab(tabName === 'guild' ? 'guild' : 'friends');
     fetchFriends();
+}
+
+document.getElementById('btn-friends').addEventListener('click', () => {
+    openSocialHub('friends');
+});
+
+document.getElementById('btn-guild').addEventListener('click', () => {
+    openSocialHub('guild');
 });
 
 document.getElementById('btn-close-social').addEventListener('click', () => {
     document.getElementById('social-container').classList.add('hidden');
+    document.getElementById('btn-friends')?.classList.remove('menu-nav-item--active');
+    document.getElementById('btn-guild')?.classList.remove('menu-nav-item--active');
 });
 
 async function parseJsonResponse(res) {
@@ -1533,35 +2569,888 @@ async function parseJsonResponse(res) {
 
 async function fetchFriends(silent = false) {
     if (!silent) document.getElementById('friends-list').innerHTML = '<div style="padding: 20px; text-align: center; color: #888;">Updating social...</div>';
+    if (!silent) document.getElementById('guild-panel').innerHTML = '<div style="padding: 20px; text-align: center; color: #888;">Syncing guild...</div>';
     try {
         const res = await fetch(`/friends-status?uid=${localUid}`);
         const data = await res.json();
-        updateSocialUI(data);
+        await fetchGuildDirectory(true);
+        updateSocialUI(data, { passiveRefresh: !!silent });
     } catch (e) {}
 }
 
-function updateSocialUI(data) {
+async function fetchGuildDirectory(silent = false) {
+    try {
+        const res = await fetch('/guild/directory');
+        const data = await parseJsonResponse(res);
+        guildDirectoryCache = Array.isArray(data.guilds) ? data.guilds : [];
+        if (!silent && lastSocialSnapshot && !lastSocialSnapshot.guild) renderGuildPanel(null);
+    } catch (e) {
+        if (!silent) guildDirectoryCache = [];
+    }
+}
+
+function guildIconCrest(iconId) {
+    switch (iconId) {
+        case 'crown':
+            return `
+                <div class="guild-crest-mark guild-crest-mark--crown" aria-hidden="true">
+                    <span></span><span></span><span></span><span></span>
+                </div>
+            `;
+        case 'nova':
+            return `
+                <div class="guild-crest-mark guild-crest-mark--nova" aria-hidden="true">
+                    <span></span><span></span><span></span><span></span>
+                </div>
+            `;
+        case 'wolf':
+            return `
+                <div class="guild-crest-mark guild-crest-mark--wolf" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                </div>
+            `;
+        case 'comet':
+        default:
+            return `
+                <div class="guild-crest-mark guild-crest-mark--comet" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                </div>
+            `;
+    }
+}
+
+function guildBannerClass(bannerId) {
+    return `guild-hero guild-hero--${bannerId || 'aurora'}`;
+}
+
+function guildVisualSelectOptions(options, currentId) {
+    return options.map((option) => `<option value="${option.id}" ${option.id === currentId ? 'selected' : ''}>${option.label}</option>`).join('');
+}
+
+function guildRecruitmentLabel(status) {
+    switch (status) {
+        case 'invite_only': return 'Invite Only';
+        case 'closed': return 'Closed';
+        case 'recruiting':
+        default: return 'Recruiting';
+    }
+}
+
+function guildRecruitmentFocusLabel(focus) {
+    switch (focus) {
+        case 'duels': return '1v1 Focus';
+        case 'squads': return '2v2 Focus';
+        case 'all_modes':
+        default: return 'All Modes';
+    }
+}
+
+function guildRecruitmentPlaystyleLabel(playstyle) {
+    switch (playstyle) {
+        case 'casual': return 'Casual';
+        case 'competitive': return 'Competitive';
+        case 'mixed':
+        default: return 'Mixed';
+    }
+}
+
+function guildDirectoryEntries(currentGuildId = null) {
+    const query = (guildDirectoryFilters.query || '').trim().toLowerCase();
+    const recruitingOnly = !!guildDirectoryFilters.recruitingOnly;
+    const sort = guildDirectoryFilters.sort || 'fit';
+    const entries = guildDirectoryCache.filter((entry) => {
+        const recruitment = entry.recruitment || {};
+        const status = recruitment.status || 'recruiting';
+        if (entry.id && entry.id === currentGuildId) return true;
+        if (recruitingOnly && status !== 'recruiting') return false;
+        if (!query) return true;
+        const blob = [
+            entry.name,
+            entry.tag,
+            entry.leaderName,
+            entry.description,
+            recruitment.message,
+            recruitment.focus,
+            recruitment.playstyle,
+            entry.bulletin && entry.bulletin.message
+        ].join(' ').toLowerCase();
+        return blob.includes(query);
+    });
+    entries.sort((a, b) => {
+        const aStatus = (a.recruitment && a.recruitment.status) || 'recruiting';
+        const bStatus = (b.recruitment && b.recruitment.status) || 'recruiting';
+        if (sort === 'newest') return (b.createdAt || 0) - (a.createdAt || 0);
+        if (sort === 'xp') return (b.xp || 0) - (a.xp || 0) || (b.memberCount || 0) - (a.memberCount || 0);
+        if (sort === 'members') return (b.memberCount || 0) - (a.memberCount || 0) || (b.xp || 0) - (a.xp || 0);
+        const statusScore = { recruiting: 3, invite_only: 2, closed: 1 };
+        return (statusScore[bStatus] || 0) - (statusScore[aStatus] || 0)
+            || ((b.memberCount || 0) - (a.memberCount || 0))
+            || ((b.xp || 0) - (a.xp || 0));
+    });
+    return entries;
+}
+
+function setGuildNoGuildView(view = 'home') {
+    guildNoGuildView = ['home', 'create', 'join'].includes(view) ? view : 'home';
+    renderGuildPanel(null);
+}
+
+function getKnownPlayerGuild() {
+    return playerProfileData && playerProfileData.guild ? playerProfileData.guild : null;
+}
+
+async function hydrateCurrentGuildFromBackend() {
+    if (guildInfoHydrationPromise) return guildInfoHydrationPromise;
+    guildInfoHydrationPromise = (async () => {
+        try {
+            const res = await fetch(`/guild/info?uid=${localUid}`);
+            const data = await parseJsonResponse(res);
+            if (data && data.ok && data.guild) {
+                applyGuildToSocialState(data.guild);
+            }
+        } catch (e) {
+        } finally {
+            guildInfoHydrationPromise = null;
+        }
+    })();
+    return guildInfoHydrationPromise;
+}
+
+function escapeGuildFieldValue(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function captureGuildDraftState() {
+    const createName = document.getElementById('guild-create-name');
+    if (createName) guildDraftState.createName = createName.value;
+    const createTag = document.getElementById('guild-create-tag');
+    if (createTag) guildDraftState.createTag = createTag.value;
+    const createDescription = document.getElementById('guild-create-description');
+    if (createDescription) guildDraftState.createDescription = createDescription.value;
+    const createIcon = document.getElementById('guild-create-icon');
+    if (createIcon) guildDraftState.createIcon = createIcon.value || 'comet';
+    const createBanner = document.getElementById('guild-create-banner');
+    if (createBanner) guildDraftState.createBanner = createBanner.value || 'aurora';
+    const createPrivacy = document.getElementById('guild-create-privacy');
+    if (createPrivacy) guildDraftState.createPrivacy = createPrivacy.value || 'public';
+    const joinCode = document.getElementById('guild-join-code');
+    if (joinCode) guildDraftState.joinCode = joinCode.value;
+
+    const guildId = lastSocialSnapshot?.guild?.id || null;
+    const adminDescription = document.getElementById('guild-admin-description');
+    if (adminDescription) {
+        guildDraftState.adminGuildId = guildId;
+        guildDraftState.adminDescription = adminDescription.value;
+    }
+    const adminIcon = document.getElementById('guild-admin-icon');
+    if (adminIcon) {
+        guildDraftState.adminGuildId = guildId;
+        guildDraftState.adminIcon = adminIcon.value || 'comet';
+    }
+    const adminBanner = document.getElementById('guild-admin-banner');
+    if (adminBanner) {
+        guildDraftState.adminGuildId = guildId;
+        guildDraftState.adminBanner = adminBanner.value || 'aurora';
+    }
+    const adminPrivacy = document.getElementById('guild-admin-privacy');
+    if (adminPrivacy) {
+        guildDraftState.adminGuildId = guildId;
+        guildDraftState.adminPrivacy = adminPrivacy.value || 'public';
+    }
+    const adminRecruitmentStatus = document.getElementById('guild-admin-recruitment-status');
+    if (adminRecruitmentStatus) {
+        guildDraftState.adminGuildId = guildId;
+        guildDraftState.adminRecruitmentStatus = adminRecruitmentStatus.value || 'recruiting';
+    }
+    const adminRecruitmentMessage = document.getElementById('guild-admin-recruitment-message');
+    if (adminRecruitmentMessage) {
+        guildDraftState.adminGuildId = guildId;
+        guildDraftState.adminRecruitmentMessage = adminRecruitmentMessage.value;
+    }
+    const adminRecruitmentFocus = document.getElementById('guild-admin-recruitment-focus');
+    if (adminRecruitmentFocus) {
+        guildDraftState.adminGuildId = guildId;
+        guildDraftState.adminRecruitmentFocus = adminRecruitmentFocus.value || 'all_modes';
+    }
+    const adminRecruitmentPlaystyle = document.getElementById('guild-admin-recruitment-playstyle');
+    if (adminRecruitmentPlaystyle) {
+        guildDraftState.adminGuildId = guildId;
+        guildDraftState.adminRecruitmentPlaystyle = adminRecruitmentPlaystyle.value || 'mixed';
+    }
+    const adminBulletinMessage = document.getElementById('guild-admin-bulletin-message');
+    if (adminBulletinMessage) {
+        guildDraftState.adminGuildId = guildId;
+        guildDraftState.adminBulletinMessage = adminBulletinMessage.value;
+    }
+    const chatInput = document.getElementById('guild-chat-input');
+    if (chatInput) {
+        guildDraftState.chatGuildId = guildId;
+        guildDraftState.chatInput = chatInput.value;
+    }
+}
+
+function captureGuildFocusState() {
+    const active = document.activeElement;
+    if (!active || !active.id || !active.closest('#guild-panel')) {
+        guildFocusState = null;
+        return;
+    }
+    guildFocusState = {
+        id: active.id,
+        selectionStart: typeof active.selectionStart === 'number' ? active.selectionStart : null,
+        selectionEnd: typeof active.selectionEnd === 'number' ? active.selectionEnd : null
+    };
+}
+
+function restoreGuildFocusState() {
+    if (!guildFocusState || document.activeElement?.id === guildFocusState.id) return;
+    const target = document.getElementById(guildFocusState.id);
+    if (!target) {
+        guildFocusState = null;
+        return;
+    }
+    try {
+        target.focus({ preventScroll: true });
+    } catch (e) {
+        target.focus();
+    }
+    if (typeof guildFocusState.selectionStart === 'number' && typeof target.setSelectionRange === 'function') {
+        try {
+            target.setSelectionRange(guildFocusState.selectionStart, guildFocusState.selectionEnd ?? guildFocusState.selectionStart);
+        } catch (e) {}
+    }
+    guildFocusState = null;
+}
+
+function captureGuildScrollState() {
+    const panel = document.getElementById('guild-panel');
+    const socialContainer = document.getElementById('social-container');
+    const guildTabPanel = document.getElementById('social-guild-tab-panel');
+    guildScrollState = panel ? (panel.scrollTop || 0) : 0;
+    guildContainerScrollState = socialContainer ? (socialContainer.scrollTop || 0) : 0;
+    guildTabPanelScrollState = guildTabPanel ? (guildTabPanel.scrollTop || 0) : 0;
+}
+
+function restoreGuildScrollState() {
+    const panel = document.getElementById('guild-panel');
+    const socialContainer = document.getElementById('social-container');
+    const guildTabPanel = document.getElementById('social-guild-tab-panel');
+    if (socialContainer) socialContainer.scrollTop = Math.max(0, guildContainerScrollState || 0);
+    if (guildTabPanel) guildTabPanel.scrollTop = Math.max(0, guildTabPanelScrollState || 0);
+    if (panel) panel.scrollTop = Math.max(0, guildScrollState || 0);
+}
+
+function restoreGuildViewStateDeferred() {
+    const restore = () => {
+        restoreGuildFocusState();
+        restoreGuildScrollState();
+    };
+    if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
+        restore();
+        return;
+    }
+    window.requestAnimationFrame(() => {
+        restore();
+        window.requestAnimationFrame(restoreGuildScrollState);
+    });
+}
+
+function clearGuildDraftState(mode = 'all') {
+    if (mode === 'all' || mode === 'noguild') {
+        guildDraftState.createName = '';
+        guildDraftState.createTag = '';
+        guildDraftState.createDescription = '';
+        guildDraftState.createIcon = 'comet';
+        guildDraftState.createBanner = 'aurora';
+        guildDraftState.createPrivacy = 'public';
+        guildDraftState.joinCode = '';
+    }
+    if (mode === 'all' || mode === 'guild') {
+        guildDraftState.adminGuildId = null;
+        guildDraftState.adminDescription = '';
+        guildDraftState.adminIcon = 'comet';
+        guildDraftState.adminBanner = 'aurora';
+        guildDraftState.adminPrivacy = 'public';
+        guildDraftState.adminRecruitmentStatus = 'recruiting';
+        guildDraftState.adminRecruitmentMessage = '';
+        guildDraftState.adminRecruitmentFocus = 'all_modes';
+        guildDraftState.adminRecruitmentPlaystyle = 'mixed';
+        guildDraftState.adminBulletinMessage = '';
+        guildDraftState.chatGuildId = null;
+        guildDraftState.chatInput = '';
+    }
+}
+
+function applyGuildToSocialState(guild, options = {}) {
+    const preferTab = options.preferTab === 'guild' ? 'guild' : 'friends';
+    captureGuildDraftState();
+    captureGuildFocusState();
+    captureGuildScrollState();
+    const base = lastSocialSnapshot || { friends: [], requests: [], invites: [] };
+    const next = { ...base, guild: guild || null };
+    lastSocialSnapshot = next;
+    if (guild) clearGuildDraftState('noguild');
+    else {
+        clearGuildDraftState('guild');
+        guildNoGuildView = 'home';
+    }
+    renderSocialGuildPreview(next.guild);
+    renderGuildPanel(next.guild);
+    restoreGuildViewStateDeferred();
+    setActiveSocialTab(next.guild ? 'guild' : preferTab);
+}
+
+function setActiveSocialTab(tabName = 'friends') {
+    activeSocialTab = tabName === 'guild' ? 'guild' : 'friends';
+    document.querySelectorAll('[data-social-tab]').forEach((btn) => {
+        const isActive = btn.dataset.socialTab === activeSocialTab;
+        btn.classList.toggle('active', isActive);
+        btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    });
+    document.querySelectorAll('[data-social-tab-panel]').forEach((panel) => {
+        panel.classList.toggle('active', panel.dataset.socialTabPanel === activeSocialTab);
+    });
+    syncSocialModalHeader();
+}
+
+function renderSocialGuildPreview(guild) {
+    const preview = document.getElementById('social-guild-preview');
+    if (!preview) return;
+    if (!guild) {
+        preview.classList.add('hidden');
+        preview.innerHTML = '';
+        return;
+    }
+    preview.classList.remove('hidden');
+    preview.innerHTML = `
+        <div class="social-guild-preview-main">
+            <div class="social-guild-preview-title">[${guild.tag}] ${guild.name}</div>
+            <div class="social-guild-preview-meta">Guild Lv. ${guild.level || 1} · ${guild.memberCount || 0}/${guild.memberCap || 50} members · Leader ${guild.leaderName || 'Unknown'}</div>
+        </div>
+        <div class="social-guild-preview-actions">
+            <button type="button" id="btn-open-guild-tab" class="menu-btn secondary-btn social-guild-preview-btn">Open Guild</button>
+            <button type="button" id="btn-leave-guild-preview" class="menu-btn secondary-btn social-guild-preview-btn">Leave Guild</button>
+        </div>
+    `;
+    document.getElementById('btn-open-guild-tab')?.addEventListener('click', () => openSocialHub('guild'));
+    document.getElementById('btn-leave-guild-preview')?.addEventListener('click', leaveGuild);
+}
+
+
+function renderGuildPanel(guild) {
+    const panel = document.getElementById('guild-panel');
+    const count = document.getElementById('guild-count');
+    if (!panel || !count) return;
+    const currentGuildId = lastSocialSnapshot?.guild?.id || null;
+    const createName = escapeGuildFieldValue(guildDraftState.createName || '');
+    const createTag = escapeGuildFieldValue(guildDraftState.createTag || '');
+    const createDescription = escapeGuildFieldValue(guildDraftState.createDescription || '');
+    const createIcon = guildDraftState.createIcon || 'comet';
+    const createBanner = guildDraftState.createBanner || 'aurora';
+    const createPrivacy = guildDraftState.createPrivacy || 'public';
+    const joinCode = escapeGuildFieldValue(guildDraftState.joinCode || '');
+    const adminDraftMatchesGuild = !!(guild && guildDraftState.adminGuildId === guild.id);
+    const chatDraftMatchesGuild = !!(guild && guildDraftState.chatGuildId === guild.id);
+    const browserQuery = escapeGuildFieldValue(guildDirectoryFilters.query || '');
+    const browserEntries = guildDirectoryEntries(currentGuildId);
+    const knownPlayerGuild = getKnownPlayerGuild();
+
+    if (!guild && ['home', 'create', 'join'].includes(guildNoGuildView)) {
+        if (knownPlayerGuild) {
+            count.innerText = `${knownPlayerGuild.memberCount || '...'} members`;
+            panel.innerHTML = `
+                <div class="guild-shell">
+                    <div class="guild-panel-note">Loading your guild data for [${knownPlayerGuild.tag}] ${knownPlayerGuild.name}...</div>
+                    <div class="guild-admin-panel">
+                        <div class="guild-section-title">Guild Sync</div>
+                        <div class="guild-directory-meta">You are already in a guild, so this tab is syncing your live guild page instead of showing create or join options.</div>
+                    </div>
+                </div>
+            `;
+            hydrateCurrentGuildFromBackend();
+            return;
+        }
+        count.innerText = 'Solo';
+        panel.innerHTML = `
+            <div class="guild-shell">
+                <div class="guild-panel-note">Choose how you want to get into a guild. Create one for your squad or browse and join an existing community.</div>
+                <div class="guild-choice-shell ${guildNoGuildView === 'home' ? '' : 'hidden'}">
+                    <button type="button" id="btn-guild-open-create" class="guild-choice-card">
+                        <strong>Create Guild</strong>
+                        <span>Start a new guild with your own tag, visuals, and recruiting setup.</span>
+                    </button>
+                    <button type="button" id="btn-guild-open-join" class="guild-choice-card">
+                        <strong>Join Guild</strong>
+                        <span>Use a guild code or browse public guilds that are currently recruiting.</span>
+                    </button>
+                </div>
+                <div class="guild-subview ${guildNoGuildView === 'create' ? '' : 'hidden'}">
+                    <div class="guild-subview-head">
+                        <div>
+                            <div class="guild-section-title">Create Guild</div>
+                            <div class="guild-panel-note">Set up your guild identity first. You can tune recruiting details after it is created.</div>
+                        </div>
+                        <button type="button" id="btn-guild-back-home-create" class="menu-btn secondary-btn guild-inline-btn">Back</button>
+                    </div>
+                    <div class="guild-form-grid">
+                        <input type="text" id="guild-create-name" class="social-input" maxlength="32" placeholder="Guild name" value="${createName}">
+                        <input type="text" id="guild-create-tag" class="social-input" maxlength="5" placeholder="Tag" value="${createTag}">
+                        <button type="button" id="btn-guild-create" class="action-btn social-add-btn guild-inline-btn">Create</button>
+                    </div>
+                    <textarea id="guild-create-description" class="social-input" maxlength="180" placeholder="Guild description" style="min-height:84px; resize:vertical;">${createDescription}</textarea>
+                    <div class="guild-admin-grid">
+                        <select id="guild-create-icon" class="social-input">${guildVisualSelectOptions(GUILD_ICON_PRESETS, createIcon)}</select>
+                        <select id="guild-create-banner" class="social-input">${guildVisualSelectOptions(GUILD_BANNER_PRESETS, createBanner)}</select>
+                        <select id="guild-create-privacy" class="social-input">
+                            <option value="public" ${createPrivacy === 'public' ? 'selected' : ''}>Public guild</option>
+                            <option value="private" ${createPrivacy === 'private' ? 'selected' : ''}>Private guild</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="guild-subview ${guildNoGuildView === 'join' ? '' : 'hidden'}">
+                    <div class="guild-subview-head">
+                        <div>
+                            <div class="guild-section-title">Join Guild</div>
+                            <div class="guild-panel-note">Enter a guild code or look through guilds that match your style.</div>
+                        </div>
+                        <button type="button" id="btn-guild-back-home-join" class="menu-btn secondary-btn guild-inline-btn">Back</button>
+                    </div>
+                    <div class="guild-form-grid guild-form-grid--join">
+                        <input type="text" id="guild-join-code" class="social-input" maxlength="8" placeholder="Guild code" value="${joinCode}">
+                        <button type="button" id="btn-guild-join" class="action-btn social-add-btn guild-inline-btn">Join</button>
+                    </div>
+                    <div class="guild-directory-shell">
+                        <div class="guild-section-title">Guild Directory</div>
+                        <div class="guild-directory-toolbar">
+                            <input type="text" id="guild-directory-search" class="social-input" maxlength="48" placeholder="Search guilds, tags, leaders..." value="${browserQuery}">
+                            <label class="guild-directory-toggle">
+                                <input type="checkbox" id="guild-directory-recruiting-only" ${guildDirectoryFilters.recruitingOnly ? 'checked' : ''}>
+                                <span>Recruiting only</span>
+                            </label>
+                            <select id="guild-directory-sort" class="social-input">
+                                <option value="fit" ${guildDirectoryFilters.sort === 'fit' ? 'selected' : ''}>Best fit</option>
+                                <option value="members" ${guildDirectoryFilters.sort === 'members' ? 'selected' : ''}>Most members</option>
+                                <option value="xp" ${guildDirectoryFilters.sort === 'xp' ? 'selected' : ''}>Most guild XP</option>
+                                <option value="newest" ${guildDirectoryFilters.sort === 'newest' ? 'selected' : ''}>Newest</option>
+                            </select>
+                        </div>
+                        ${browserEntries.length ? browserEntries.map((entry) => `
+                            <div class="guild-directory-card">
+                                <div class="guild-directory-head">
+                                    <div>
+                                        <div class="guild-name-line">
+                                            <span class="guild-tag-badge">${entry.tag}</span>
+                                            <span class="guild-name-title">${entry.name}</span>
+                                        </div>
+                                        <div class="guild-directory-meta">Guild Lv. ${entry.level || 1} · ${entry.memberCount || 0}/${entry.memberCap || 50} members · Leader ${entry.leaderName || 'Unknown'}</div>
+                                    </div>
+                                    <div class="guild-crest">${guildIconCrest(entry.icon)}</div>
+                                </div>
+                                <div class="guild-directory-meta">${entry.description || 'No description yet.'}</div>
+                                <div class="guild-directory-pills">
+                                    <span class="guild-pill guild-pill--status guild-pill--${(entry.recruitment && entry.recruitment.status) || 'recruiting'}">${guildRecruitmentLabel(entry.recruitment && entry.recruitment.status)}</span>
+                                    <span class="guild-pill">${guildRecruitmentFocusLabel(entry.recruitment && entry.recruitment.focus)}</span>
+                                    <span class="guild-pill">${guildRecruitmentPlaystyleLabel(entry.recruitment && entry.recruitment.playstyle)}</span>
+                                </div>
+                                ${entry.recruitment && entry.recruitment.message ? `<div class="guild-directory-recruitment">${entry.recruitment.message}</div>` : ''}
+                                ${entry.bulletin && entry.bulletin.message ? `<div class="guild-directory-bulletin">Guild bulletin: ${entry.bulletin.message}</div>` : ''}
+                                <div class="guild-directory-actions">
+                                    ${((entry.recruitment && entry.recruitment.status) === 'closed'
+                                        ? `<span class="guild-directory-status guild-directory-status--muted">Recruitment Closed</span>`
+                                        : (entry.recruitment && entry.recruitment.status) === 'invite_only'
+                                            ? `<span class="guild-directory-status guild-directory-status--muted">Invite Only</span>`
+                                            : `<button type="button" class="action-btn social-add-btn guild-inline-btn" onclick="joinGuildByCode('${entry.joinCode}', true)">Join ${entry.tag}</button>`)}
+                                </div>
+                            </div>
+                        `).join('') : '<div class="guild-directory-empty">No guilds match those filters right now.</div>'}
+                    </div>
+                </div>
+            </div>
+        `;
+        document.getElementById('btn-guild-open-create')?.addEventListener('click', () => setGuildNoGuildView('create'));
+        document.getElementById('btn-guild-open-join')?.addEventListener('click', () => setGuildNoGuildView('join'));
+        document.getElementById('btn-guild-back-home-create')?.addEventListener('click', () => setGuildNoGuildView('home'));
+        document.getElementById('btn-guild-back-home-join')?.addEventListener('click', () => setGuildNoGuildView('home'));
+        document.getElementById('btn-guild-create')?.addEventListener('click', createGuild);
+        document.getElementById('btn-guild-join')?.addEventListener('click', joinGuild);
+        document.getElementById('guild-directory-search')?.addEventListener('input', (e) => {
+            captureGuildFocusState();
+            captureGuildScrollState();
+            guildDirectoryFilters.query = e.target.value || '';
+            renderGuildPanel(null);
+            restoreGuildViewStateDeferred();
+        });
+        document.getElementById('guild-directory-recruiting-only')?.addEventListener('change', (e) => {
+            captureGuildFocusState();
+            captureGuildScrollState();
+            guildDirectoryFilters.recruitingOnly = !!e.target.checked;
+            renderGuildPanel(null);
+            restoreGuildViewStateDeferred();
+        });
+        document.getElementById('guild-directory-sort')?.addEventListener('change', (e) => {
+            captureGuildFocusState();
+            captureGuildScrollState();
+            guildDirectoryFilters.sort = e.target.value || 'fit';
+            renderGuildPanel(null);
+            restoreGuildViewStateDeferred();
+        });
+        return;
+    }
+
+    if (!guild) {
+        count.innerText = 'Solo';
+        panel.innerHTML = `
+            <div class="guild-shell">
+                <div class="guild-panel-note">Build a guild identity, browse public guilds, or join an invite code from your squad leader.</div>
+                <div class="guild-form-grid">
+                    <input type="text" id="guild-create-name" class="social-input" maxlength="32" placeholder="Guild name" value="${createName}">
+                    <input type="text" id="guild-create-tag" class="social-input" maxlength="5" placeholder="Tag" value="${createTag}">
+                    <button type="button" id="btn-guild-create" class="action-btn social-add-btn guild-inline-btn">Create</button>
+                </div>
+                <textarea id="guild-create-description" class="social-input" maxlength="180" placeholder="Guild description" style="min-height:84px; resize:vertical;">${createDescription}</textarea>
+                <div class="guild-admin-grid">
+                    <select id="guild-create-icon" class="social-input">${guildVisualSelectOptions(GUILD_ICON_PRESETS, createIcon)}</select>
+                    <select id="guild-create-banner" class="social-input">${guildVisualSelectOptions(GUILD_BANNER_PRESETS, createBanner)}</select>
+                    <select id="guild-create-privacy" class="social-input">
+                        <option value="public" ${createPrivacy === 'public' ? 'selected' : ''}>Public guild</option>
+                        <option value="private" ${createPrivacy === 'private' ? 'selected' : ''}>Private guild</option>
+                    </select>
+                </div>
+                <div class="guild-form-grid guild-form-grid--join">
+                    <input type="text" id="guild-join-code" class="social-input" maxlength="8" placeholder="Guild code" value="${joinCode}">
+                    <button type="button" id="btn-guild-join" class="action-btn social-add-btn guild-inline-btn">Join</button>
+                </div>
+                <div class="guild-directory-shell">
+                    <div class="guild-section-title">Guild Directory</div>
+                    <div class="guild-directory-toolbar">
+                        <input type="text" id="guild-directory-search" class="social-input" maxlength="48" placeholder="Search guilds, tags, leaders..." value="${browserQuery}">
+                        <label class="guild-directory-toggle">
+                            <input type="checkbox" id="guild-directory-recruiting-only" ${guildDirectoryFilters.recruitingOnly ? 'checked' : ''}>
+                            <span>Recruiting only</span>
+                        </label>
+                        <select id="guild-directory-sort" class="social-input">
+                            <option value="fit" ${guildDirectoryFilters.sort === 'fit' ? 'selected' : ''}>Best fit</option>
+                            <option value="members" ${guildDirectoryFilters.sort === 'members' ? 'selected' : ''}>Most members</option>
+                            <option value="xp" ${guildDirectoryFilters.sort === 'xp' ? 'selected' : ''}>Most guild XP</option>
+                            <option value="newest" ${guildDirectoryFilters.sort === 'newest' ? 'selected' : ''}>Newest</option>
+                        </select>
+                    </div>
+                    ${browserEntries.length ? browserEntries.map((entry) => `
+                        <div class="guild-directory-card">
+                            <div class="guild-directory-head">
+                                <div>
+                                    <div class="guild-name-line">
+                                        <span class="guild-tag-badge">${entry.tag}</span>
+                                        <span class="guild-name-title">${entry.name}</span>
+                                    </div>
+                                    <div class="guild-directory-meta">Guild Lv. ${entry.level || 1} · ${entry.memberCount || 0}/${entry.memberCap || 50} members · Leader ${entry.leaderName || 'Unknown'}</div>
+                                </div>
+                                <div class="guild-crest">${guildIconCrest(entry.icon)}</div>
+                            </div>
+                            <div class="guild-directory-meta">${entry.description || 'No description yet.'}</div>
+                            <div class="guild-directory-pills">
+                                <span class="guild-pill guild-pill--status guild-pill--${(entry.recruitment && entry.recruitment.status) || 'recruiting'}">${guildRecruitmentLabel(entry.recruitment && entry.recruitment.status)}</span>
+                                <span class="guild-pill">${guildRecruitmentFocusLabel(entry.recruitment && entry.recruitment.focus)}</span>
+                                <span class="guild-pill">${guildRecruitmentPlaystyleLabel(entry.recruitment && entry.recruitment.playstyle)}</span>
+                            </div>
+                            ${entry.recruitment && entry.recruitment.message ? `<div class="guild-directory-recruitment">${entry.recruitment.message}</div>` : ''}
+                            ${entry.bulletin && entry.bulletin.message ? `<div class="guild-directory-bulletin">Guild bulletin: ${entry.bulletin.message}</div>` : ''}
+                            <div class="guild-directory-actions">
+                                ${entry.id && entry.id === currentGuildId
+                                    ? `<span class="guild-directory-status">Current Guild</span>`
+                                    : ((entry.recruitment && entry.recruitment.status) === 'closed'
+                                        ? `<span class="guild-directory-status guild-directory-status--muted">Recruitment Closed</span>`
+                                        : (entry.recruitment && entry.recruitment.status) === 'invite_only'
+                                            ? `<span class="guild-directory-status guild-directory-status--muted">Invite Only</span>`
+                                            : `<button type="button" class="action-btn social-add-btn guild-inline-btn" onclick="joinGuildByCode('${entry.joinCode}', true)">Join ${entry.tag}</button>`)}
+                            </div>
+                        </div>
+                    `).join('') : '<div class="guild-directory-empty">No guilds match those filters right now.</div>'}
+                </div>
+            </div>
+        `;
+        document.getElementById('btn-guild-create')?.addEventListener('click', createGuild);
+        document.getElementById('btn-guild-join')?.addEventListener('click', joinGuild);
+        document.getElementById('guild-directory-search')?.addEventListener('input', (e) => {
+            captureGuildFocusState();
+            guildDirectoryFilters.query = e.target.value || '';
+            renderGuildPanel(null);
+            restoreGuildFocusState();
+        });
+        document.getElementById('guild-directory-recruiting-only')?.addEventListener('change', (e) => {
+            captureGuildFocusState();
+            guildDirectoryFilters.recruitingOnly = !!e.target.checked;
+            renderGuildPanel(null);
+            restoreGuildFocusState();
+        });
+        document.getElementById('guild-directory-sort')?.addEventListener('change', (e) => {
+            captureGuildFocusState();
+            guildDirectoryFilters.sort = e.target.value || 'fit';
+            renderGuildPanel(null);
+            restoreGuildFocusState();
+        });
+        return;
+    }
+
+    const recruitment = guild.recruitment || {};
+    const members = (guild.members || []).slice().sort((a, b) => {
+        const roleScore = (m) => (m.role === 'Leader' ? 1 : 0);
+        return roleScore(b) - roleScore(a) || (b.contributedXp || 0) - (a.contributedXp || 0);
+    });
+    const leader = members.find((member) => member.role === 'Leader');
+    const foundedLabel = guild.createdAt ? new Date(guild.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown';
+    const topContributor = guild.topContributor ? `${guild.topContributor.username} (${guild.topContributor.contributedXp || 0} XP)` : 'No data yet';
+    const progressPct = Math.max(0, Math.min(100, Number(guild.levelProgressPct) || 0));
+    const progressLabel = `${guild.xpIntoLevel || 0} / ${Math.max(1, (guild.nextLevelXp || 0) - (guild.levelFloorXp || 0))} XP`;
+    const myMember = members.find((member) => member.uid === localUid);
+    const canManageGuild = !!(myMember && (myMember.role === 'Leader' || myMember.role === 'Officer'));
+    const canManageRoles = !!(myMember && myMember.role === 'Leader');
+    const canManageRecruitment = !!(myMember && (myMember.role === 'Leader' || myMember.role === 'Recruiter'));
+    const adminDescription = escapeGuildFieldValue(adminDraftMatchesGuild ? guildDraftState.adminDescription : (guild.description || ''));
+    const adminIcon = adminDraftMatchesGuild ? guildDraftState.adminIcon : (guild.icon || 'comet');
+    const adminBanner = adminDraftMatchesGuild ? guildDraftState.adminBanner : (guild.banner || 'aurora');
+    const adminPrivacy = adminDraftMatchesGuild ? guildDraftState.adminPrivacy : (guild.isPublic ? 'public' : 'private');
+    const adminRecruitmentStatus = adminDraftMatchesGuild ? guildDraftState.adminRecruitmentStatus : (recruitment.status || (guild.isPublic ? 'recruiting' : 'invite_only'));
+    const adminRecruitmentMessage = escapeGuildFieldValue(adminDraftMatchesGuild ? guildDraftState.adminRecruitmentMessage : (recruitment.message || ''));
+    const adminRecruitmentFocus = adminDraftMatchesGuild ? guildDraftState.adminRecruitmentFocus : (recruitment.focus || 'all_modes');
+    const adminRecruitmentPlaystyle = adminDraftMatchesGuild ? guildDraftState.adminRecruitmentPlaystyle : (recruitment.playstyle || 'mixed');
+    const adminBulletinMessage = escapeGuildFieldValue(adminDraftMatchesGuild ? guildDraftState.adminBulletinMessage : ((guild.bulletin && guild.bulletin.message) || ''));
+    const chatInputValue = escapeGuildFieldValue(chatDraftMatchesGuild ? guildDraftState.chatInput : '');
+    const chatRows = (guild.chat || []).slice(-20).map((msg) => {
+        const when = new Date(msg.ts || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        return `
+            <div class="guild-chat-row">
+                <div class="guild-chat-head">
+                    <span class="guild-chat-user">${msg.username}</span>
+                    <span class="guild-chat-time">${when}</span>
+                </div>
+                <div class="guild-chat-msg">${msg.message}</div>
+            </div>
+        `;
+    }).join('');
+    count.innerText = `${guild.memberCount || members.length}/${guild.memberCap || 50}`;
+    panel.innerHTML = `
+        <div class="guild-shell">
+            <div class="${guildBannerClass(guild.banner)}">
+                <div class="guild-hero-top">
+                    <div class="guild-crest">${guildIconCrest(guild.icon)}</div>
+                    <div class="guild-hero-copy">
+                        <div class="guild-identity">
+                            <div>
+                                <div class="guild-name-line">
+                                    <span class="guild-tag-badge">${guild.tag}</span>
+                                    <span class="guild-name-title">${guild.name}</span>
+                                </div>
+                                <div class="guild-meta-line">Guild Lv. ${guild.level || 1} · ${(guild.xp || 0)} XP · ${guild.isPublic ? 'Public guild' : 'Private guild'} · Join code <span class="guild-code">${guild.joinCode}</span></div>
+                                <div class="guild-directory-pills" style="margin-top:10px">
+                                    <span class="guild-pill guild-pill--status guild-pill--${recruitment.status || 'recruiting'}">${guildRecruitmentLabel(recruitment.status)}</span>
+                                    <span class="guild-pill">${guildRecruitmentFocusLabel(recruitment.focus)}</span>
+                                    <span class="guild-pill">${guildRecruitmentPlaystyleLabel(recruitment.playstyle)}</span>
+                                </div>
+                            </div>
+                            <button type="button" id="btn-guild-leave" class="menu-btn secondary-btn guild-inline-btn">Leave</button>
+                        </div>
+                        <div class="guild-hero-description">${guild.description || 'No guild description set yet.'}</div>
+                        ${recruitment.message ? `<div class="guild-recruitment-banner">${recruitment.message}</div>` : ''}
+                        ${guild.bulletin && guild.bulletin.message ? `<div class="guild-bulletin-card"><strong>Guild Bulletin</strong><span>${guild.bulletin.message}</span></div>` : ''}
+                    </div>
+                </div>
+            </div>
+            <div class="guild-summary-grid">
+                <div class="guild-summary-card"><div class="guild-summary-label">Leader</div><div class="guild-summary-value">${guild.leaderName || (leader ? leader.username : 'Unknown')}</div></div>
+                <div class="guild-summary-card"><div class="guild-summary-label">Members</div><div class="guild-summary-value">${guild.memberCount || members.length}/${guild.memberCap || 50}</div></div>
+                <div class="guild-summary-card"><div class="guild-summary-label">Guild XP</div><div class="guild-summary-value">${guild.xp || 0}</div></div>
+                <div class="guild-summary-card"><div class="guild-summary-label">Founded</div><div class="guild-summary-value">${foundedLabel}</div></div>
+                <div class="guild-summary-card"><div class="guild-summary-label">Top Contributor</div><div class="guild-summary-value">${topContributor}</div></div>
+                <div class="guild-summary-card"><div class="guild-summary-label">Total Member XP</div><div class="guild-summary-value">${guild.totalContributionXp || 0}</div></div>
+                <div class="guild-summary-card"><div class="guild-summary-label">Join Code</div><div class="guild-summary-value">${guild.joinCode}</div></div>
+                <div class="guild-summary-card"><div class="guild-summary-label">Next Level</div><div class="guild-summary-value">${guild.xpNeededForNextLevel || 0} XP away</div></div>
+            </div>
+            <div class="guild-progress-shell">
+                <div class="guild-progress-head">
+                    <div class="guild-progress-title">Guild Progress</div>
+                    <div class="guild-progress-meta">${progressLabel}</div>
+                </div>
+                <div class="guild-progress-bar">
+                    <div class="guild-progress-fill" style="width:${progressPct}%"></div>
+                </div>
+            </div>
+            ${canManageGuild ? `
+                <div class="guild-admin-panel">
+                    <div class="guild-section-title">Guild Admin</div>
+                    <div class="guild-admin-note">Guild admins can update the description, icon, banner, and privacy. Public guilds appear in the guild directory.</div>
+                    <textarea id="guild-admin-description" class="social-input" maxlength="180" placeholder="Guild description" style="min-height:84px; resize:vertical;">${adminDescription}</textarea>
+                    <div class="guild-admin-grid">
+                        <select id="guild-admin-icon" class="social-input">${guildVisualSelectOptions(GUILD_ICON_PRESETS, adminIcon)}</select>
+                        <select id="guild-admin-banner" class="social-input">${guildVisualSelectOptions(GUILD_BANNER_PRESETS, adminBanner)}</select>
+                        <select id="guild-admin-privacy" class="social-input">
+                            <option value="public" ${adminPrivacy === 'public' ? 'selected' : ''}>Public guild</option>
+                            <option value="private" ${adminPrivacy === 'private' ? 'selected' : ''}>Private guild</option>
+                        </select>
+                        <button type="button" id="btn-guild-save-settings" class="action-btn social-add-btn guild-inline-btn">Save Settings</button>
+                    </div>
+                </div>
+            ` : ''}
+            ${canManageRecruitment ? `
+                <div class="guild-admin-panel">
+                    <div class="guild-section-title">Recruitment Studio</div>
+                    <div class="guild-admin-note">Leaders and approved recruiters can publish the guild's browser pitch and keep a short bulletin up to date for members and recruits.</div>
+                    <textarea id="guild-admin-recruitment-message" class="social-input" maxlength="200" placeholder="What kind of players are you looking for?" style="min-height:84px; resize:vertical;">${adminRecruitmentMessage}</textarea>
+                    <div class="guild-admin-grid">
+                        <select id="guild-admin-recruitment-status" class="social-input">
+                            <option value="recruiting" ${adminRecruitmentStatus === 'recruiting' ? 'selected' : ''}>Recruiting</option>
+                            <option value="invite_only" ${adminRecruitmentStatus === 'invite_only' ? 'selected' : ''}>Invite only</option>
+                            <option value="closed" ${adminRecruitmentStatus === 'closed' ? 'selected' : ''}>Closed</option>
+                        </select>
+                        <select id="guild-admin-recruitment-focus" class="social-input">
+                            <option value="all_modes" ${adminRecruitmentFocus === 'all_modes' ? 'selected' : ''}>All modes</option>
+                            <option value="duels" ${adminRecruitmentFocus === 'duels' ? 'selected' : ''}>1v1 focus</option>
+                            <option value="squads" ${adminRecruitmentFocus === 'squads' ? 'selected' : ''}>2v2 focus</option>
+                        </select>
+                        <select id="guild-admin-recruitment-playstyle" class="social-input">
+                            <option value="mixed" ${adminRecruitmentPlaystyle === 'mixed' ? 'selected' : ''}>Mixed</option>
+                            <option value="casual" ${adminRecruitmentPlaystyle === 'casual' ? 'selected' : ''}>Casual</option>
+                            <option value="competitive" ${adminRecruitmentPlaystyle === 'competitive' ? 'selected' : ''}>Competitive</option>
+                        </select>
+                    </div>
+                    <textarea id="guild-admin-bulletin-message" class="social-input" maxlength="160" placeholder="Guild bulletin for members and visitors" style="min-height:68px; resize:vertical;">${adminBulletinMessage}</textarea>
+                    <button type="button" id="btn-guild-save-recruitment" class="action-btn social-add-btn guild-inline-btn">Publish Recruitment</button>
+                </div>
+            ` : ''}
+            <div class="guild-section-title">Roster</div>
+            <div class="guild-members">
+                ${members.map((m) => `
+                    <div class="guild-member-row">
+                        <div class="guild-member-main">
+                            <div class="guild-member-name">${m.username}</div>
+                            <div class="guild-member-role">${m.role || 'Member'}</div>
+                            <div class="guild-member-meta">Joined ${new Date(m.joinedAt || Date.now()).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}</div>
+                        </div>
+                        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
+                            <div class="guild-member-xp">${m.contributedXp || 0} XP</div>
+                            ${canManageRoles && m.uid !== localUid ? `
+                                <button type="button" class="menu-btn secondary-btn guild-inline-btn" onclick="setGuildMemberRole('${m.uid}', 'Officer')">Officer</button>
+                                <button type="button" class="menu-btn secondary-btn guild-inline-btn" onclick="setGuildMemberRole('${m.uid}', 'Recruiter')">Recruiter</button>
+                                <button type="button" class="menu-btn secondary-btn guild-inline-btn" onclick="setGuildMemberRole('${m.uid}', 'Member')">Member</button>
+                            ` : ''}
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+            <div class="guild-chat-shell">
+                <div class="guild-section-title">Guild Chat</div>
+                <div id="guild-chat-list" class="guild-chat-list">${chatRows || '<div class="guild-chat-empty">No guild chatter yet. Break the silence.</div>'}</div>
+                <div class="guild-chat-compose">
+                    <input type="text" id="guild-chat-input" class="social-input" maxlength="160" placeholder="Message your guild" value="${chatInputValue}">
+                    <button type="button" id="btn-guild-chat-send" class="action-btn social-add-btn guild-inline-btn">Send</button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.getElementById('btn-guild-leave')?.addEventListener('click', leaveGuild);
+    document.getElementById('btn-guild-save-settings')?.addEventListener('click', saveGuildSettings);
+    document.getElementById('btn-guild-save-recruitment')?.addEventListener('click', saveGuildSettings);
+    document.getElementById('btn-guild-chat-send')?.addEventListener('click', sendGuildChat);
+    document.getElementById('guild-chat-input')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            sendGuildChat();
+        }
+    });
+}
+
+function guildRenderSignature(guild) {
+    if (!guild) return 'noguild';
+    return JSON.stringify({
+        id: guild.id || null,
+        name: guild.name || '',
+        tag: guild.tag || '',
+        description: guild.description || '',
+        level: guild.level || 1,
+        xp: guild.xp || 0,
+        memberCount: guild.memberCount || 0,
+        memberCap: guild.memberCap || 0,
+        leaderName: guild.leaderName || '',
+        isPublic: !!guild.isPublic,
+        icon: guild.icon || '',
+        banner: guild.banner || '',
+        recruitment: guild.recruitment || null,
+        bulletin: guild.bulletin || null,
+        members: Array.isArray(guild.members) ? guild.members.map((member) => ({
+            uid: member.uid || '',
+            username: member.username || '',
+            role: member.role || '',
+            contributedXp: member.contributedXp || 0,
+            joinedAt: member.joinedAt || ''
+        })) : [],
+        chat: Array.isArray(guild.chat) ? guild.chat.map((entry) => ({
+            uid: entry.uid || '',
+            username: entry.username || '',
+            role: entry.role || '',
+            message: entry.message || '',
+            createdAt: entry.createdAt || ''
+        })) : []
+    });
+}
+
+function updateSocialUI(data, options = {}) {
     if (!data) return;
+    const passiveRefresh = !!options.passiveRefresh;
+    captureGuildDraftState();
+    captureGuildFocusState();
+    captureGuildScrollState();
+    const previousGuild = lastSocialSnapshot ? lastSocialSnapshot.guild : null;
     lastSocialSnapshot = data;
     const friends = data.friends || [];
     const requests = data.requests || [];
-    const duelInvites = data.duelInvites || [];
+    const invites = data.invites || [];
+    const guild = data.guild || null;
+    const isSocialOpen = !document.getElementById('social-container').classList.contains('hidden');
+    const shouldFreezeGuildRender = passiveRefresh
+        && isSocialOpen
+        && activeSocialTab === 'guild';
+    if (!guild && getKnownPlayerGuild()) {
+        renderSocialGuildPreview(getKnownPlayerGuild());
+        if (!shouldFreezeGuildRender) {
+            renderGuildPanel(null);
+            restoreGuildViewStateDeferred();
+        }
+        const friendsBadge = document.getElementById('social-tab-friends-badge');
+        const guildBadge = document.getElementById('social-tab-guild-badge');
+        if (friendsBadge) friendsBadge.innerText = `${friends.length}`;
+        if (guildBadge) guildBadge.innerText = `${getKnownPlayerGuild().memberCount || '...'} members`;
+        return;
+    }
     
     document.getElementById('friends-count').innerText = `${friends.length}/100`;
+    renderSocialGuildPreview(guild);
+    if (!shouldFreezeGuildRender) {
+        renderGuildPanel(guild);
+        restoreGuildViewStateDeferred();
+    }
+    const friendsBadge = document.getElementById('social-tab-friends-badge');
+    const guildBadge = document.getElementById('social-tab-guild-badge');
+    if (friendsBadge) friendsBadge.innerText = `${friends.length}`;
+    if (guildBadge) guildBadge.innerText = guild ? `${guild.memberCount || (guild.members || []).length} members` : 'Solo';
 
-    // Update notification dot (friend requests + duel invites)
+    // Update notification dot (friend requests + invites)
     const dot = document.getElementById('social-dot');
-    if (requests.length > 0 || duelInvites.length > 0) dot.classList.remove('hidden');
+    if (requests.length > 0 || invites.length > 0) dot.classList.remove('hidden');
     else dot.classList.add('hidden');
 
     refreshMenuActivityBadge(data);
 
     const duelToast = document.getElementById('menu-duel-invite-toast');
     if (duelToast) {
-        if (duelInvites.length > 0) {
+        if (invites.length > 0) {
             duelToast.classList.remove('hidden');
             const t = duelToast.querySelector('.menu-duel-invite-toast-text');
-            if (t) t.textContent = duelInvites.length === 1 ? 'You have a duel invite from a friend.' : `You have ${duelInvites.length} duel invites.`;
+            if (t) t.textContent = invites.length === 1 ? 'You have a game invite from a friend.' : `You have ${invites.length} game invites.`;
         } else {
             duelToast.classList.add('hidden');
         }
@@ -1570,27 +3459,55 @@ function updateSocialUI(data) {
     if (menuActivityPopoverOpen) renderMenuActivityPopoverBody();
 
     // Only update the list if the container is open
-    const isSocialOpen = !document.getElementById('social-container').classList.contains('hidden');
     if (!isSocialOpen) return;
+    if (guild && !previousGuild) setActiveSocialTab('guild');
 
     const list = document.getElementById('friends-list');
     let html = '';
 
-    if (duelInvites.length > 0) {
-        html += `<div style="background: rgba(255, 200, 120, 0.08); padding: 10px; font-weight: bold; font-size: 0.9rem; color: #ffcc80; margin-bottom: 5px;">Duel invites (${duelInvites.length})</div>`;
-        duelInvites.forEach((d) => {
-            html += `
-                <div style="padding: 10px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: space-between; background: rgba(255, 180, 80, 0.06);">
-                    <div>
-                        <div style="font-weight: bold; color: #eee;">${d.fromUsername}</div>
-                        <div style="font-size: 0.75rem; color: #888;">Private match · code ${d.code}</div>
+    if (invites.length > 0) {
+        html += `<div style="background: rgba(255, 200, 120, 0.08); padding: 10px; font-weight: bold; font-size: 0.9rem; color: #ffcc80; margin-bottom: 5px;">Game Invites (${invites.length})</div>`;
+        invites.forEach((d) => {
+            if (d.type === 'duel') {
+                html += `
+                    <div style="padding: 10px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: space-between; background: rgba(255, 180, 80, 0.06);">
+                        <div>
+                            <div style="font-weight: bold; color: #eee;">${d.fromUsername}</div>
+                            <div style="font-size: 0.75rem; color: #888;">Private match · code ${d.code}</div>
+                        </div>
+                        <div style="display: flex; gap: 8px;">
+                            <button onclick="acceptInvite('${d.fromUid}', 'duel')" style="background: #00ffcc; border: none; color: #000; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer; font-weight: bold;">Accept</button>
+                            <button onclick="declineInvite('${d.fromUid}', 'duel')" style="background: #444; border: none; color: #fff; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer;">Decline</button>
+                        </div>
                     </div>
-                    <div style="display: flex; gap: 8px;">
-                        <button onclick="acceptDuelInvite('${d.fromUid}')" style="background: #00ffcc; border: none; color: #000; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer; font-weight: bold;">Accept</button>
-                        <button onclick="declineDuelInvite('${d.fromUid}')" style="background: #444; border: none; color: #fff; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer;">Decline</button>
+                `;
+            } else if (d.type === 'party') {
+                html += `
+                    <div style="padding: 10px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: space-between; background: rgba(200, 100, 255, 0.06);">
+                        <div>
+                            <div style="font-weight: bold; color: #eee;">${d.fromUsername}</div>
+                            <div style="font-size: 0.75rem; color: #888;">Party invite (2v2)</div>
+                        </div>
+                        <div style="display: flex; gap: 8px;">
+                            <button onclick="acceptInvite('${d.fromUid}', 'party')" style="background: #cc66ff; border: none; color: #000; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer; font-weight: bold;">Accept</button>
+                            <button onclick="declineInvite('${d.fromUid}', 'party')" style="background: #444; border: none; color: #fff; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer;">Decline</button>
+                        </div>
                     </div>
-                </div>
-            `;
+                `;
+            } else if (d.type === 'guild') {
+                html += `
+                    <div style="padding: 10px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: space-between; background: rgba(80, 170, 255, 0.07);">
+                        <div>
+                            <div style="font-weight: bold; color: #eee;">${d.fromUsername}</div>
+                            <div style="font-size: 0.75rem; color: #888;">Guild invite · [${d.guildTag || 'TAG'}] ${d.guildName || 'Guild'}</div>
+                        </div>
+                        <div style="display: flex; gap: 8px;">
+                            <button onclick="acceptInvite('${d.fromUid}', 'guild')" style="background: #7dcfff; border: none; color: #00111f; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer; font-weight: bold;">Join</button>
+                            <button onclick="declineInvite('${d.fromUid}', 'guild')" style="background: #444; border: none; color: #fff; border-radius: 4px; padding: 4px 10px; font-size: 0.8rem; cursor: pointer;">Decline</button>
+                        </div>
+                    </div>
+                `;
+            }
         });
         html += '<div style="height: 15px;"></div>';
     }
@@ -1616,7 +3533,7 @@ function updateSocialUI(data) {
     }
 
     // Friends Section
-    if (friends.length === 0 && requests.length === 0 && duelInvites.length === 0) {
+    if (friends.length === 0 && requests.length === 0 && invites.length === 0) {
         list.innerHTML = '<div style="padding: 20px; text-align: center; color: #888;">No friends yet. Add some to play together!</div>';
         return;
     }
@@ -1636,7 +3553,9 @@ function updateSocialUI(data) {
                         </div>
                     </div>
                     <div style="display: flex; flex-shrink: 0; flex-wrap: wrap; gap: 6px; justify-content: flex-end;">
-                        <button type="button" onclick="challengeFriend('${f.uid}')" style="background: rgba(0, 210, 255, 0.2); border: 1px solid rgba(0, 210, 255, 0.45); color: #9ef0ff; border-radius: 4px; padding: 4px 10px; font-size: 0.75rem; cursor: pointer; font-weight: bold;">Challenge</button>
+                        ${lastSocialSnapshot && lastSocialSnapshot.guild ? `<button type="button" onclick="sendInvite('${f.uid}', 'guild')" style="background: rgba(125, 207, 255, 0.18); border: 1px solid rgba(125, 207, 255, 0.4); color: #bfeaff; border-radius: 4px; padding: 4px 10px; font-size: 0.75rem; cursor: pointer; font-weight: bold;">Guild</button>` : ''}
+                        <button type="button" onclick="sendInvite('${f.uid}', 'party')" style="background: rgba(204, 102, 255, 0.2); border: 1px solid rgba(204, 102, 255, 0.45); color: #e6b3ff; border-radius: 4px; padding: 4px 10px; font-size: 0.75rem; cursor: pointer; font-weight: bold;">+ Party</button>
+                        <button type="button" onclick="sendInvite('${f.uid}', 'duel')" style="background: rgba(0, 210, 255, 0.2); border: 1px solid rgba(0, 210, 255, 0.45); color: #9ef0ff; border-radius: 4px; padding: 4px 10px; font-size: 0.75rem; cursor: pointer; font-weight: bold;">Challenge</button>
                         <button onclick="removeFriend('${f.uid}')" style="background: none; border: none; color: #ff0055; opacity: 0.5; cursor: pointer; font-size: 0.8rem; padding: 5px;">Remove</button>
                     </div>
                 </div>
@@ -1648,12 +3567,12 @@ function updateSocialUI(data) {
     list.innerHTML = html;
 }
 
-window.challengeFriend = async (targetUid) => {
+window.sendInvite = async (targetUid, type = 'duel') => {
     try {
-        const res = await fetch('/friend-duel-invite', {
+        const res = await fetch('/friend-invite-send', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uid: localUid, targetUid })
+            body: JSON.stringify({ uid: localUid, targetUid, type })
         });
         const data = await parseJsonResponse(res);
         if (data.ok && data.roomId) {
@@ -1663,29 +3582,41 @@ window.challengeFriend = async (targetUid) => {
             reportPresenceIfChanged(true);
             connectWebSocket(data.roomId);
             fetchFriends(true);
+        } else if (data.ok && data.partyId) {
+            connectParty(data.partyId);
         } else {
-            alert(data.error || 'Could not send challenge');
+            alert(data.error || 'Could not send invite');
         }
     } catch (e) {
         alert(e.message || 'Connection error');
     }
 };
 
-window.acceptDuelInvite = async (fromUid) => {
+window.acceptInvite = async (fromUid, type) => {
     try {
-        const res = await fetch('/friend-duel-accept', {
+        const res = await fetch('/friend-invite-accept', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uid: localUid, fromUid })
+            body: JSON.stringify({ uid: localUid, fromUid, type })
         });
         const data = await parseJsonResponse(res);
-        if (data.ok && data.roomId) {
+        if (data.ok && data.type === 'duel' && data.roomId) {
             document.getElementById('social-container').classList.add('hidden');
             document.getElementById('matchmaking-overlay').classList.remove('hidden');
             document.getElementById('matchmaking-text').innerText = 'Joining private match...';
             reportPresenceIfChanged(true);
             connectWebSocket(data.roomId);
             fetchFriends(true);
+        } else if (data.ok && data.type === 'party' && data.partyId) {
+            connectParty(data.partyId);
+        } else if (data.ok && data.type === 'guild' && data.guild) {
+            const errorEl = document.getElementById('social-error');
+            applyGuildToSocialState(data.guild);
+            errorEl.style.color = '#00ffcc';
+            errorEl.innerText = `Joined guild: ${data.guild.name}`;
+            errorEl.classList.remove('hidden');
+            fetchFriends();
+            fetchPlayerProfile(true);
         } else {
             alert(data.error || 'Invite is no longer valid');
             fetchFriends();
@@ -1696,12 +3627,12 @@ window.acceptDuelInvite = async (fromUid) => {
     }
 };
 
-window.declineDuelInvite = async (fromUid) => {
+window.declineInvite = async (fromUid, type) => {
     try {
-        await fetch('/friend-duel-decline', {
+        await fetch('/friend-invite-decline', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uid: localUid, fromUid })
+            body: JSON.stringify({ uid: localUid, fromUid, type })
         });
         fetchFriends();
     } catch (e) {}
@@ -1761,6 +3692,8 @@ document.getElementById('btn-add-friend').addEventListener('click', async () => 
     }
 });
 
+document.getElementById('btn-profile-leave-guild')?.addEventListener('click', leaveGuild);
+
 window.removeFriend = async (friendUid) => {
     if (!confirm('Are you sure you want to remove this friend?')) return;
     try {
@@ -1772,6 +3705,216 @@ window.removeFriend = async (friendUid) => {
         fetchFriends();
     } catch (e) {}
 };
+
+async function createGuild() {
+    const errorEl = document.getElementById('social-error');
+    const name = document.getElementById('guild-create-name')?.value?.trim() || '';
+    const tag = document.getElementById('guild-create-tag')?.value?.trim() || '';
+    const description = document.getElementById('guild-create-description')?.value?.trim() || '';
+    const icon = document.getElementById('guild-create-icon')?.value || 'comet';
+    const banner = document.getElementById('guild-create-banner')?.value || 'aurora';
+    const isPublic = (document.getElementById('guild-create-privacy')?.value || 'public') === 'public';
+    errorEl.classList.add('hidden');
+    try {
+        const res = await fetch('/guild/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, name, tag, description, icon, banner, isPublic })
+        });
+        const data = await parseJsonResponse(res);
+        if (!data.ok) throw new Error(data.error || 'Could not create guild');
+        applyGuildToSocialState(data.guild);
+        errorEl.style.color = '#00ffcc';
+        errorEl.innerText = `Guild created: ${data.guild.name}`;
+        errorEl.classList.remove('hidden');
+        fetchFriends();
+        fetchPlayerProfile(true);
+    } catch (e) {
+        errorEl.style.color = '#ff4444';
+        errorEl.innerText = e.message || 'Could not create guild';
+        errorEl.classList.remove('hidden');
+    }
+}
+
+async function joinGuild() {
+    const errorEl = document.getElementById('social-error');
+    const code = document.getElementById('guild-join-code')?.value?.trim() || '';
+    errorEl.classList.add('hidden');
+    try {
+        const res = await fetch('/guild/join', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, code })
+        });
+        const data = await parseJsonResponse(res);
+        if (!data.ok) throw new Error(data.error || 'Could not join guild');
+        applyGuildToSocialState(data.guild);
+        errorEl.style.color = '#00ffcc';
+        errorEl.innerText = `Joined guild: ${data.guild.name}`;
+        errorEl.classList.remove('hidden');
+        fetchFriends();
+        fetchPlayerProfile(true);
+    } catch (e) {
+        errorEl.style.color = '#ff4444';
+        errorEl.innerText = e.message || 'Could not join guild';
+        errorEl.classList.remove('hidden');
+    }
+}
+
+async function leaveGuild() {
+    const guild = lastSocialSnapshot && lastSocialSnapshot.guild ? lastSocialSnapshot.guild : null;
+    const isLastMember = guild && Number(guild.memberCount || 0) <= 1;
+    const confirmMessage = isLastMember
+        ? 'Leave your current guild? You are the last member, so the guild will be permanently disbanded.'
+        : 'Leave your current guild? If you are the last member, the guild will be disbanded.';
+    if (!confirm(confirmMessage)) return;
+    const errorEl = document.getElementById('social-error');
+    errorEl.classList.add('hidden');
+    try {
+        const res = await fetch('/guild/leave', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid })
+        });
+        const data = await parseJsonResponse(res);
+        if (!data.ok) throw new Error(data.error || 'Could not leave guild');
+        errorEl.style.color = '#00ffcc';
+        errorEl.innerText = data.disbanded ? 'You left the guild. Since no members remained, the guild was disbanded.' : 'You left the guild.';
+        errorEl.classList.remove('hidden');
+        applyGuildToSocialState(null, { preferTab: 'guild' });
+        fetchFriends();
+        fetchPlayerProfile(true);
+    } catch (e) {
+        errorEl.style.color = '#ff4444';
+        errorEl.innerText = e.message || 'Could not leave guild';
+        errorEl.classList.remove('hidden');
+    }
+}
+
+async function sendGuildChat() {
+    const input = document.getElementById('guild-chat-input');
+    const errorEl = document.getElementById('social-error');
+    const message = input?.value?.trim() || '';
+    if (!message) return;
+    errorEl.classList.add('hidden');
+    try {
+        const res = await fetch('/guild/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, message })
+        });
+        const data = await parseJsonResponse(res);
+        if (!data.ok) throw new Error(data.error || 'Could not send message');
+        if (input) input.value = '';
+        if (data.guild) applyGuildToSocialState(data.guild);
+        fetchFriends(true);
+    } catch (e) {
+        errorEl.style.color = '#ff4444';
+        errorEl.innerText = e.message || 'Could not send guild message';
+        errorEl.classList.remove('hidden');
+    }
+}
+
+window.joinGuildByCode = async (code, allowPrivateJoin = false) => {
+    const joinInput = document.getElementById('guild-join-code');
+    if (joinInput) joinInput.value = code;
+    try {
+        const res = await fetch('/guild/join', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, code, allowPrivateJoin })
+        });
+        const data = await parseJsonResponse(res);
+        if (!data.ok) throw new Error(data.error || 'Could not join guild');
+        const errorEl = document.getElementById('social-error');
+        applyGuildToSocialState(data.guild);
+        errorEl.style.color = '#00ffcc';
+        errorEl.innerText = `Joined guild: ${data.guild.name}`;
+        errorEl.classList.remove('hidden');
+        fetchFriends();
+        fetchPlayerProfile(true);
+    } catch (e) {
+        const errorEl = document.getElementById('social-error');
+        errorEl.style.color = '#ff4444';
+        errorEl.innerText = e.message || 'Could not join guild';
+        errorEl.classList.remove('hidden');
+    }
+};
+
+async function saveGuildSettings() {
+    const errorEl = document.getElementById('social-error');
+    errorEl.classList.add('hidden');
+    try {
+        const payload = { uid: localUid };
+        const adminDescriptionEl = document.getElementById('guild-admin-description');
+        const adminIconEl = document.getElementById('guild-admin-icon');
+        const adminBannerEl = document.getElementById('guild-admin-banner');
+        const adminPrivacyEl = document.getElementById('guild-admin-privacy');
+        if (adminDescriptionEl) payload.description = adminDescriptionEl.value.trim();
+        if (adminIconEl) payload.icon = adminIconEl.value || 'comet';
+        if (adminBannerEl) payload.banner = adminBannerEl.value || 'aurora';
+        if (adminPrivacyEl) payload.isPublic = (adminPrivacyEl.value || 'public') === 'public';
+        const recruitmentStatusEl = document.getElementById('guild-admin-recruitment-status');
+        const recruitmentMessageEl = document.getElementById('guild-admin-recruitment-message');
+        const recruitmentFocusEl = document.getElementById('guild-admin-recruitment-focus');
+        const recruitmentPlaystyleEl = document.getElementById('guild-admin-recruitment-playstyle');
+        const bulletinEl = document.getElementById('guild-admin-bulletin-message');
+        if (recruitmentStatusEl) payload.recruitmentStatus = recruitmentStatusEl.value || 'recruiting';
+        if (recruitmentMessageEl) payload.recruitmentMessage = recruitmentMessageEl.value.trim();
+        if (recruitmentFocusEl) payload.recruitmentFocus = recruitmentFocusEl.value || 'all_modes';
+        if (recruitmentPlaystyleEl) payload.recruitmentPlaystyle = recruitmentPlaystyleEl.value || 'mixed';
+        if (bulletinEl) payload.bulletinMessage = bulletinEl.value.trim();
+        const res = await fetch('/guild/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await parseJsonResponse(res);
+        if (!data.ok) throw new Error(data.error || 'Could not save guild settings');
+        applyGuildToSocialState(data.guild);
+        errorEl.style.color = '#00ffcc';
+        errorEl.innerText = 'Guild settings updated.';
+        errorEl.classList.remove('hidden');
+        fetchFriends(true);
+        fetchGuildDirectory(true);
+        fetchPlayerProfile(true);
+    } catch (e) {
+        errorEl.style.color = '#ff4444';
+        errorEl.innerText = e.message || 'Could not save guild settings';
+        errorEl.classList.remove('hidden');
+    }
+}
+
+window.setGuildMemberRole = async (targetUid, role) => {
+    const errorEl = document.getElementById('social-error');
+    errorEl.classList.add('hidden');
+    try {
+        const res = await fetch('/guild/member-role', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: localUid, targetUid, role })
+        });
+        const data = await parseJsonResponse(res);
+        if (!data.ok) throw new Error(data.error || 'Could not update guild member role');
+        applyGuildToSocialState(data.guild);
+        errorEl.style.color = '#00ffcc';
+        errorEl.innerText = 'Guild roster updated.';
+        errorEl.classList.remove('hidden');
+        fetchFriends(true);
+    } catch (e) {
+        errorEl.style.color = '#ff4444';
+        errorEl.innerText = e.message || 'Could not update guild member role';
+        errorEl.classList.remove('hidden');
+    }
+};
+
+document.querySelectorAll('[data-social-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+        setActiveSocialTab(btn.dataset.socialTab);
+    });
+});
+
+setActiveSocialTab('friends');
 
 // Private Match UI
 document.getElementById('btn-close-private').addEventListener('click', () => {
@@ -1851,22 +3994,186 @@ document.getElementById('btn-submit-join').addEventListener('click', async () =>
     }
 });
 
+// ==========================================
+// PARTY MATCH LOGIC
+// ==========================================
+let partySocket = null;
+let currentPartyData = null;
+
+function connectParty(partyId) {
+    if (partySocket) partySocket.close();
+    
+    document.getElementById('social-container').classList.add('hidden');
+    document.getElementById('play-mode-modal').classList.add('hidden');
+    document.getElementById('party-lobby-container').classList.remove('hidden');
+    
+    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const encodedUser = encodeURIComponent(myUsername);
+    partySocket = new WebSocket(`${wsProto}//${location.host}/join-party?partyId=${partyId}&uid=${localUid}&username=${encodedUser}`);
+    
+    partySocket.onopen = () => {
+        console.log("Party WS Connected");
+    };
+    partySocket.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'state' || msg.type === 'PARTY_STATE') {
+            currentPartyData = msg.state;
+            renderPartyUI();
+        } else if (msg.type === 'error') {
+            alert(msg.message || msg.error || 'Party error');
+        } else if (msg.type === 'match_found' || msg.type === 'MATCH_FOUND') {
+            partySocket.close();
+            partySocket = null;
+            document.getElementById('party-lobby-container').classList.add('hidden');
+            document.getElementById('matchmaking-overlay').classList.remove('hidden');
+            document.getElementById('matchmaking-text').innerText = "Joining 2v2 Match...";
+            // Use same GameRoom WS flow for the 2v2
+            connectWebSocket(msg.roomId, '2v2');
+        }
+    };
+    partySocket.onclose = () => {
+        if (document.getElementById('party-lobby-container').classList.contains('hidden')) return;
+        document.getElementById('party-lobby-container').classList.add('hidden');
+        document.getElementById('main-menu-container').classList.remove('hidden');
+        currentPartyData = null;
+        lastPartyReadyCount = 0;
+    };
+}
+
+function renderPartyUI() {
+    if (!currentPartyData) return;
+    const grid = document.getElementById('party-members-list');
+    grid.innerHTML = '';
+    
+    const members = currentPartyData.members || [];
+    const leaderUid = currentPartyData.leader || currentPartyData.leaderUid;
+    const readyCount = members.filter(m => m.isReady).length;
+    if (readyCount > lastPartyReadyCount && typeof sfx !== 'undefined' && typeof sfx.playLevelUp === 'function') {
+        sfx.playLevelUp();
+    }
+    lastPartyReadyCount = readyCount;
+    members.forEach(m => {
+        const isLeader = m.uid === leaderUid;
+        const isReady = !!m.isReady;
+        const isMe = m.uid === localUid;
+        const badges = [
+            isLeader ? '<span class="party-member-badge party-member-badge--leader">Leader</span>' : '',
+            isReady ? '<span class="party-member-badge party-member-badge--ready">Ready</span>' : '',
+            isMe ? '<span class="party-member-badge party-member-badge--you">You</span>' : ''
+        ].filter(Boolean).join('');
+        grid.innerHTML += `
+            <div class="party-member-card ${isLeader ? 'leader' : ''} ${isReady ? 'ready party-member-card--pulse' : ''}">
+                ${isLeader ? '<div class="party-member-leader-crown">👑</div>' : ''}
+                <div class="party-member-badges">${badges}</div>
+                <div class="party-member-name">${m.username}</div>
+                <div class="party-member-status">${isReady ? 'Ready to queue' : 'Waiting to ready up'}</div>
+            </div>
+        `;
+    });
+    
+    // Pad with empty cards
+    for (let i = members.length; i < 4; i++) {
+        grid.innerHTML += `
+            <div class="party-member-card" style="opacity: 0.5; border-style: dashed;">
+                <div class="party-member-name">Empty</div>
+                <div class="party-member-status">Waiting...</div>
+            </div>
+        `;
+    }
+    
+    const isMeLeader = localUid === leaderUid;
+    const myMemberInfo = members.find(m => m.uid === localUid);
+    const amIReady = myMemberInfo ? myMemberInfo.isReady : false;
+    
+    const btnReady = document.getElementById('btn-party-ready');
+    const btnFindMatch = document.getElementById('btn-party-find-match');
+    const statusText = document.getElementById('party-status-text');
+    
+    btnReady.innerText = amIReady ? 'Unready' : 'Ready up!';
+    
+    if (isMeLeader) {
+        btnFindMatch.classList.remove('hidden');
+        const allReady = members.every(m => m.isReady);
+        btnFindMatch.disabled = !allReady || members.length < 2; 
+        statusText.innerText = allReady ? `Squad ready (${readyCount}/${members.length})` : `Ready players: ${readyCount}/${members.length}`;
+        statusText.classList.toggle('party-status-text--ready', allReady);
+        statusText.style.color = allReady ? "#00ffcc" : "#ffaa00";
+    } else {
+        btnFindMatch.classList.add('hidden');
+        statusText.innerText = `Waiting for Leader... (${readyCount}/${members.length} ready)`;
+        statusText.style.color = "#ffaa00";
+        statusText.classList.remove('party-status-text--ready');
+    }
+}
+
+document.getElementById('btn-party-ready')?.addEventListener('click', () => {
+    if (typeof sfx !== 'undefined' && sfx.playClick) sfx.playClick();
+    if (partySocket && partySocket.readyState === WebSocket.OPEN) {
+        const myMemberInfo = currentPartyData?.members.find(m => m.uid === localUid);
+        if (myMemberInfo) {
+            partySocket.send(JSON.stringify({ action: 'set_ready', isReady: !myMemberInfo.isReady }));
+        }
+    }
+});
+
+document.getElementById('btn-party-find-match')?.addEventListener('click', () => {
+    if (typeof sfx !== 'undefined' && sfx.playClick) sfx.playClick();
+    if (partySocket && partySocket.readyState === WebSocket.OPEN) {
+        partySocket.send(JSON.stringify({ action: 'find_match' }));
+        document.getElementById('party-status-text').innerText = "Entering 2v2 Matchmaking...";
+    }
+});
+
+document.getElementById('btn-leave-party')?.addEventListener('click', () => {
+    if (typeof sfx !== 'undefined' && sfx.playClick) sfx.playClick();
+    if (partySocket) {
+        partySocket.close();
+        partySocket = null;
+    }
+    document.getElementById('party-lobby-container').classList.add('hidden');
+    document.getElementById('main-menu-container').classList.remove('hidden');
+    currentPartyData = null;
+    lastPartyReadyCount = 0;
+});
+
 // Ability bar click handler
+window.targetModeIndex = -1;
+
+window.selectTarget = function(targetId) {
+    if (window.targetModeIndex !== -1 && socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ action: 'ability', abilityIndex: window.targetModeIndex, targetId }));
+        if (matchStats.active) matchStats.abilitiesUsed += 1;
+        if (typeof sfx !== 'undefined' && sfx.playAttack) sfx.playAttack();
+        
+        // Hide prompt
+        window.targetModeIndex = -1;
+        document.getElementById('target-prompt').classList.add('hidden');
+        document.querySelectorAll('.player-hud').forEach(el => el.style.border = '2px solid transparent');
+        
+        document.getElementById('status-message').innerText = "Action Locked In!";
+    }
+};
+
 document.querySelectorAll('.ability-btn').forEach(btn => {
     btn.addEventListener('click', () => {
         if (socket && socket.readyState === WebSocket.OPEN) {
             const idx = parseInt(btn.dataset.index);
-            socket.send(JSON.stringify({ action: 'ability', abilityIndex: idx }));
-            if (matchStats.active) matchStats.abilitiesUsed += 1;
-            sfx.playAttack();
-            // Quick attack animation
-            if (playerLeftShape && idx <= 1) {
-                game.scene.scenes[0].tweens.add({
-                    targets: playerLeftShape,
-                    x: playerLeftShape.x + 50,
-                    duration: 100,
-                    yoyo: true
+            const is2v2 = gameState && Object.keys(gameState.players).length > 2;
+
+            if (is2v2) {
+                // Enter target select mode
+                window.targetModeIndex = idx;
+                document.getElementById('target-prompt').classList.remove('hidden');
+                document.querySelectorAll('.player-hud').forEach(el => {
+                    el.style.border = '2px solid #00ffcc';
+                    el.style.cursor = 'pointer';
                 });
+            } else {
+                // 1v1 auto-target
+                socket.send(JSON.stringify({ action: 'ability', abilityIndex: idx, targetId: (myPlayerId === 'p1' ? 'p2' : 'p1') }));
+                if (matchStats.active) matchStats.abilitiesUsed += 1;
+                if (typeof sfx !== 'undefined' && sfx.playAttack) sfx.playAttack();
+                // Sequence attack animation omitted to stay lean
             }
         }
     });
@@ -1995,6 +4302,12 @@ window.addEventListener('resize', () => {
 // Settings & Profile UI Logic
 document.getElementById('btn-profile').addEventListener('click', () => {
     document.getElementById('profile-container').classList.remove('hidden');
+    const st = document.getElementById('profile-title-status');
+    if (st) {
+        st.classList.add('hidden');
+        st.textContent = '';
+        st.classList.remove('profile-title-status--error');
+    }
     fetchPlayerProfile();
 });
 document.getElementById('btn-close-profile').addEventListener('click', () => {
@@ -2112,7 +4425,7 @@ if (btnViewChangelog) {
         const contentDiv = document.getElementById('changelog-content');
         if (contentDiv) contentDiv.innerHTML = '<p class="changelog-loading">Loading changelog...</p>';
         try {
-            const res = await fetch(`http://${window.location.hostname}:8083/changelog`);
+            const res = await fetch('/lumen-clash/CHANGELOG.md');
             if (!res.ok) throw new Error("Changelog not found");
             const text = await res.text();
             if (contentDiv) {
@@ -2193,36 +4506,122 @@ function openBattlePass() {
     if (!playerProfileData) return;
     const track = document.getElementById('bp-track');
     const rankEl = document.getElementById('bp-account-level');
+    const heroRankEl = document.getElementById('bp-hero-rank');
+    const nextRankEl = document.getElementById('bp-next-rank');
+    const statusHeadingEl = document.getElementById('bp-status-heading');
+    const statusCopyEl = document.getElementById('bp-status-copy');
+    const progressSummaryEl = document.getElementById('bp-progress-summary');
+    const trackProgressFillEl = document.getElementById('bp-track-progress-fill');
+    const premiumStatusCopyEl = document.getElementById('bp-premium-status-copy');
+    const nextRewardIconEl = document.getElementById('bp-next-reward-icon');
+    const nextRewardNameEl = document.getElementById('bp-next-reward-name');
+    const nextRewardDescEl = document.getElementById('bp-next-reward-desc');
     rankEl.innerText = playerProfileData.level;
-    
+    const passXpEl = document.getElementById('bp-pass-xp');
+    const lumensSrvEl = document.getElementById('bp-lumens-server');
+    if (passXpEl) passXpEl.innerText = String(Math.max(0, Number(playerProfileData.luminaryPassXp) || 0));
+    if (lumensSrvEl) lumensSrvEl.innerText = String(Math.max(0, Number(playerProfileData.lumens) || 0));
+
     track.innerHTML = '';
     // Generate nodes for levels 1-20
     const accLevel = Math.max(1, Number(playerProfileData.level) || 1);
+
+    // Premium unlock UI (server banked Lumens; localStorage mirrors after unlock)
+    const lumensEarned = bpLumensEarnedByRank(accLevel);
+    const cost = BP_PREMIUM_UNLOCK_COST_LUMENS;
+    const serverLumens = Math.max(0, Number(playerProfileData.lumens) || 0);
+    const premiumAlready = bpPremiumUnlocked() || !!playerProfileData.bpPremiumUnlocked;
+    const eligible = serverLumens >= cost;
+    const premiumActive = premiumAlready || eligible;
+    const nextRank = Math.min(20, accLevel + 1);
+    const nextReward = BP_REWARDS[nextRank];
+    const rewardCard = battlePassRewardPresentation(nextReward, nextRank);
+    const completionPct = Math.min(100, (accLevel / 20) * 100);
+
+    if (heroRankEl) heroRankEl.textContent = String(accLevel);
+    if (nextRankEl) nextRankEl.textContent = String(nextRank);
+    if (progressSummaryEl) progressSummaryEl.textContent = `Rank ${accLevel} of 20`;
+    if (trackProgressFillEl) trackProgressFillEl.style.width = `${completionPct}%`;
+    if (nextRewardIconEl) nextRewardIconEl.textContent = rewardCard.icon;
+    if (nextRewardNameEl) nextRewardNameEl.textContent = `Rank ${nextRank}: ${rewardCard.name}`;
+    if (nextRewardDescEl) nextRewardDescEl.textContent = rewardCard.desc;
+    if (statusHeadingEl) {
+        statusHeadingEl.textContent = premiumAlready
+            ? 'Premium season active'
+            : eligible
+                ? 'You can unlock premium now'
+                : 'Keep climbing the pass';
+    }
+    if (statusCopyEl) {
+        if (premiumAlready) {
+            statusCopyEl.textContent = 'Your premium track is active, so every new rank adds more value to each session.';
+        } else if (eligible) {
+            statusCopyEl.textContent = `You have enough lumens to unlock premium right now and start claiming the paid side of the track.`;
+        } else {
+            statusCopyEl.textContent = `Your next highlighted reward lands at rank ${nextRank}. Keep playing matches to move the track forward.`;
+        }
+    }
+
+    const premiumStatus = document.getElementById('bp-premium-status');
+    if (premiumStatus) {
+        premiumStatus.textContent = premiumActive ? 'Premium active' : 'Premium locked';
+        premiumStatus.classList.toggle('bp-premium-status--active', premiumActive);
+        premiumStatus.classList.toggle('bp-premium-status--locked', !premiumActive);
+    }
+    if (premiumStatusCopyEl) premiumStatusCopyEl.textContent = premiumActive ? 'Active' : 'Locked';
+
+    const creditsEarnedEl = document.getElementById('bp-credits-earned');
+    if (creditsEarnedEl) creditsEarnedEl.textContent = `${lumensEarned}`;
+    const creditsCostEl = document.getElementById('bp-credits-cost');
+    if (creditsCostEl) creditsCostEl.textContent = `${cost}`;
+    const creditsFill = document.getElementById('bp-credits-fill');
+    if (creditsFill) creditsFill.style.width = `${Math.min(100, (lumensEarned / cost) * 100)}%`;
+
+    const unlockBtn = document.getElementById('btn-bp-unlock-premium');
+    if (unlockBtn) {
+        unlockBtn.classList.toggle('hidden', premiumAlready || !eligible);
+        unlockBtn.disabled = premiumAlready || !eligible;
+        unlockBtn.textContent = premiumAlready ? 'Premium unlocked' : 'Unlock Premium';
+        unlockBtn.onclick = async () => {
+            if (bpPremiumUnlocked() || playerProfileData.bpPremiumUnlocked) return;
+            if (serverLumens < cost) return;
+            try {
+                const r = await fetch('/unlock-premium', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ uid: localUid })
+                });
+                const j = await r.json();
+                if (!j.ok) return;
+                if (j.stats) playerProfileData = { ...playerProfileData, ...j.stats };
+                setBpPremiumUnlocked(true);
+                openBattlePass();
+            } catch (e) {
+                console.error('unlock-premium failed', e);
+            }
+        };
+    }
     for (let i = 1; i <= 20; i++) {
         const node = document.createElement('div');
         node.className = 'bp-node';
         if (i <= accLevel) node.classList.add('unlocked');
         if (i === Math.min(20, accLevel)) node.classList.add('current');
-        
+        if (i === nextRank && i > accLevel) node.classList.add('next');
+
         const reward = BP_REWARDS[i];
-        let icon = '🔒';
-        let name = 'Empty';
-        
-        if (reward) {
-            icon = reward.type === 'emote' ? reward.id : (reward.type === 'title' ? '📜' : '🎨');
-            if (reward.id === 'hype') icon = '🎈';
-            name = reward.name;
-        } else if (i === 1) {
-            icon = '🌱';
-            name = 'Start';
-        }
+        const rewardInfo = battlePassRewardPresentation(reward, i);
 
         node.innerHTML = `
             <div class="lvl">Lvl ${i}</div>
-            <div class="reward-icon">${icon}</div>
-            <div class="reward-name">${name}</div>
+            <div class="reward-icon">${rewardInfo.icon}</div>
+            <div class="reward-name">${rewardInfo.name}</div>
         `;
         track.appendChild(node);
+    }
+
+    const currentNode = track.querySelector('.bp-node.current') || track.querySelector('.bp-node.next');
+    if (currentNode && typeof currentNode.scrollIntoView === 'function') {
+        currentNode.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
     }
     
     document.getElementById('battle-pass-modal').classList.remove('hidden');
@@ -2249,17 +4648,6 @@ function openCharacterPreview(charId) {
     document.getElementById('preview-hp-bar').style.width = Math.min(100, (currentHP / 300) * 100) + '%';
     document.getElementById('preview-atk-bar').style.width = Math.min(100, (currentATK / 50) * 100) + '%';
     
-    // Fill Titles Select
-    const titleSelect = document.getElementById('select-title');
-    titleSelect.innerHTML = '<option value="">No Title</option>';
-    (playerProfileData.unlockedTitles || []).forEach(title => {
-        const opt = document.createElement('option');
-        opt.value = title;
-        opt.innerText = title;
-        if (playerProfileData.equippedTitle === title) opt.selected = true;
-        titleSelect.appendChild(opt);
-    });
-
     // Skin Selector Logic
     updateSkinPreview();
 
@@ -2268,49 +4656,75 @@ function openCharacterPreview(charId) {
 }
 
 function updateSkinPreview() {
-    const skins = ['Default'];
-    if (currentPreviewCharId === 'voidWeaver' && playerProfileData.level >= 3) skins.push('Verdant');
-    if (playerProfileData.level >= 10) skins.push('Abyssal');
-    if (playerProfileData.level >= 20) skins.push('Lumen Legend');
+    const skins = getAllSkinsForChar(currentPreviewCharId);
+    const equipped = (playerProfileData && playerProfileData.equippedSkins && playerProfileData.equippedSkins[currentPreviewCharId]) || 'Default';
     
-    const equipped = playerProfileData.equippedSkins[currentPreviewCharId] || 'Default';
-    currentSkinIndex = skins.indexOf(equipped);
+    currentSkinIndex = skins.findIndex(s => s.name === equipped);
     if (currentSkinIndex === -1) currentSkinIndex = 0;
 
-    document.getElementById('current-skin-name').innerText = skins[currentSkinIndex];
+    applySkinPreviewState();
+}
+
+function applySkinPreviewState() {
+    const skins = getAllSkinsForChar(currentPreviewCharId);
+    if (skins.length === 0) return;
+    const skin = skins[currentSkinIndex];
+    document.getElementById('current-skin-name').innerText = skin.name;
     refreshCharacterPreviewImg();
+
+    const r = playerProfileData ? Math.max(1, Number(playerProfileData.level) || 1) : 1;
+    let unlocked = true;
+    let lockReason = '';
+    
+    if (skin.reqLevel && r < skin.reqLevel) {
+        unlocked = false;
+        lockReason = `Requires Lv. ${skin.reqLevel}`;
+    } else if (skin.reqItem) {
+        if (!(playerProfileData && playerProfileData.unlockedCosmetics && playerProfileData.unlockedCosmetics.includes(skin.reqItem))) {
+            unlocked = false;
+            lockReason = `Shop Item`;
+        }
+    }
+
+    const btn = document.getElementById('btn-save-customization');
+    if (!unlocked) {
+        btn.disabled = true;
+        btn.innerHTML = `${lockReason}`;
+        btn.style.opacity = '0.5';
+        btn.style.cursor = 'not-allowed';
+    } else {
+        btn.disabled = false;
+        btn.innerHTML = 'Save Selection';
+        btn.style.opacity = '1';
+        btn.style.cursor = 'pointer';
+    }
 }
 
 function nextSkin() {
-    const skins = ['Default'];
-    if (currentPreviewCharId === 'voidWeaver' && playerProfileData.level >= 3) skins.push('Verdant');
-    if (playerProfileData.level >= 10) skins.push('Abyssal');
-    if (playerProfileData.level >= 20) skins.push('Lumen Legend');
+    const skins = getAllSkinsForChar(currentPreviewCharId);
     currentSkinIndex = (currentSkinIndex + 1) % skins.length;
-    document.getElementById('current-skin-name').innerText = skins[currentSkinIndex];
-    refreshCharacterPreviewImg();
+    applySkinPreviewState();
 }
 
 function prevSkin() {
-    const skins = ['Default'];
-    if (currentPreviewCharId === 'voidWeaver' && playerProfileData.level >= 3) skins.push('Verdant');
-    if (playerProfileData.level >= 10) skins.push('Abyssal');
-    if (playerProfileData.level >= 20) skins.push('Lumen Legend');
+    const skins = getAllSkinsForChar(currentPreviewCharId);
     currentSkinIndex = (currentSkinIndex - 1 + skins.length) % skins.length;
-    document.getElementById('current-skin-name').innerText = skins[currentSkinIndex];
-    refreshCharacterPreviewImg();
+    applySkinPreviewState();
 }
 
 async function saveCustomization() {
-    const title = document.getElementById('select-title').value;
     const skinName = document.getElementById('current-skin-name').innerText;
-    
+    const titlePreserve =
+        playerProfileData && playerProfileData.equippedTitle !== undefined
+            ? playerProfileData.equippedTitle
+            : '';
+
     try {
         const res = await fetch('/save-customization', {
             method: 'POST',
             body: JSON.stringify({
                 uid: localUid,
-                equippedTitle: title,
+                equippedTitle: titlePreserve,
                 charId: currentPreviewCharId,
                 skin: skinName
             })
@@ -2325,6 +4739,55 @@ async function saveCustomization() {
             fetchPlayerProfile(); // Refresh
         }
     } catch(e) { console.error("Save failed", e); }
+}
+
+async function saveProfileTitle() {
+    const titleSelect = document.getElementById('profile-select-title');
+    const statusEl = document.getElementById('profile-title-status');
+    if (!titleSelect || !playerProfileData) return;
+
+    const title = titleSelect.value;
+    const charId = CHARACTER_CLASSES[selectedCharacterIndex]?.id || 'aegisKnight';
+    const skin =
+        (playerProfileData.equippedSkins && playerProfileData.equippedSkins[charId]) || 'Default';
+
+    if (statusEl) {
+        statusEl.classList.remove('hidden', 'profile-title-status--error');
+        statusEl.textContent = 'Saving…';
+    }
+
+    try {
+        const res = await fetch('/save-customization', {
+            method: 'POST',
+            body: JSON.stringify({
+                uid: localUid,
+                equippedTitle: title,
+                charId,
+                skin
+            })
+        });
+        if (res.ok) {
+            if (playerProfileData) playerProfileData.equippedTitle = title;
+            syncMainMenuHeaderProfile(playerProfileData);
+            if (statusEl) {
+                statusEl.textContent = 'Title updated.';
+                statusEl.classList.remove('profile-title-status--error');
+            }
+            sfx.playClick();
+            await fetchPlayerProfile(true);
+        } else {
+            if (statusEl) {
+                statusEl.textContent = 'Could not save title. Try again.';
+                statusEl.classList.add('profile-title-status--error');
+            }
+        }
+    } catch (e) {
+        console.error('Save title failed', e);
+        if (statusEl) {
+            statusEl.textContent = 'Could not save title.';
+            statusEl.classList.add('profile-title-status--error');
+        }
+    }
 }
 
 // Fail-safe global handlers for Splash Screen
@@ -2344,9 +4807,14 @@ window.handleSplashExit = function() {
 
     document.getElementById('ui-container').classList.add('hidden');
     document.getElementById('matchmaking-overlay').classList.add('hidden');
+    const hso = document.getElementById('hero-select-overlay');
+    if (hso) hso.classList.add('hidden');
     document.getElementById('main-menu-container').classList.remove('hidden');
     closeMenuActivityPopover();
     reportPresenceIfChanged(true);
+
+    const rpm = document.getElementById('report-player-modal');
+    if (rpm) rpm.classList.add('hidden');
 
     if (!game) initGame();
     const layoutWhenReady = () => {
@@ -2409,14 +4877,22 @@ async function showXPSplash(won, pg) {
     console.group("[Splash] Initialization");
     console.log("Won:", won);
     console.log("PostGame Data:", pg);
+
+    if (!pg) {
+        console.warn("[Splash] Proceeding with minimal data (no postGame stats)");
+    }
     
     const splash = document.getElementById('xp-splash-overlay');
     const title = document.getElementById('splash-title');
+    const subtitle = document.getElementById('splash-subtitle');
     const levelEl = document.getElementById('splash-level');
     const xpGainedEl = document.getElementById('splash-xp-gained');
     const xpFill = document.getElementById('splash-xp-fill');
     const xpDetails = document.getElementById('splash-xp-details');
     const lvlBurst = document.getElementById('level-up-burst');
+    const outcomeCopyEl = document.getElementById('splash-outcome-copy');
+    const heroCopyEl = document.getElementById('splash-hero-copy');
+    const progressCopyEl = document.getElementById('splash-progress-copy');
     
     const bpRankEl = document.getElementById('bp-splash-rank');
     const bpFill = document.getElementById('bp-splash-fill');
@@ -2426,6 +4902,10 @@ async function showXPSplash(won, pg) {
     const statTaken = document.getElementById('splash-stat-dmg-taken');
     const statAbilities = document.getElementById('splash-stat-abilities');
     const statTurns = document.getElementById('splash-stat-turns');
+
+    const rankedMod = document.getElementById('ranked-splash-module');
+    const rankedTierEl = document.getElementById('ranked-splash-tier');
+    const rankedDeltaEl = document.getElementById('ranked-splash-delta');
 
     if (!splash) {
         console.error("[Splash] FATAL: Overlay element not found");
@@ -2449,9 +4929,11 @@ async function showXPSplash(won, pg) {
         const iWonSeries = myW >= ser.needed;
         title.innerText = iWonSeries ? 'SERIES WON' : 'SERIES LOST';
         title.style.color = iWonSeries ? '#00d2ff' : '#ff0055';
+        if (subtitle) subtitle.innerText = 'MATCH SET COMPLETE';
     } else {
         title.innerText = won ? 'VICTORY' : 'DEFEAT';
         title.style.color = won ? '#00d2ff' : '#ff0055';
+        if (subtitle) subtitle.innerText = pg && pg.isRanked ? 'RANKED MATCH COMPLETE' : 'MATCH COMPLETE';
     }
     xpFill.style.transition = 'none';
     xpFill.style.width = '0%';
@@ -2504,41 +4986,102 @@ async function showXPSplash(won, pg) {
     const rmStatus = document.getElementById('rematch-status');
     if (rmStatus) rmStatus.innerText = '';
 
-    if (statDealt) statDealt.innerText = String(Math.max(0, Math.round(matchStats.damageDealt || 0)));
-    if (statTaken) statTaken.innerText = String(Math.max(0, Math.round(matchStats.damageTaken || 0)));
-    if (statAbilities) statAbilities.innerText = String(Math.max(0, Math.round(matchStats.abilitiesUsed || 0)));
-    if (statTurns) statTurns.innerText = String(Math.max(0, Math.round(matchStats.turnSwaps || 0)));
+    lastReportContext = { roomId: lastRoomId || null, reportedUid: null };
+    if (typeof gameState !== 'undefined' && gameState && gameState.players && myPlayerId) {
+        const oid = myPlayerId === 'p1' ? 'p2' : 'p1';
+        const opp = gameState.players[oid];
+        if (opp && opp.uid) lastReportContext.reportedUid = opp.uid;
+    }
+    const qLine = document.getElementById('splash-quest-line');
+    if (qLine) {
+        if (pg && pg.questCompleted && pg.questCompleted.length) {
+            qLine.textContent = `Quests completed: ${pg.questCompleted.map((q) => q.label).join(' · ')}`;
+            qLine.classList.remove('hidden');
+        } else {
+            qLine.classList.add('hidden');
+            qLine.textContent = '';
+        }
+    }
+
+    if (statDealt) {
+        const val = (pg && pg.matchStats && pg.matchStats.damageDealt !== undefined) ? pg.matchStats.damageDealt : matchStats.damageDealt;
+        statDealt.innerText = String(Math.max(0, Math.round(val || 0)));
+    }
+    if (statTaken) {
+        const val = (pg && pg.matchStats && pg.matchStats.damageTaken !== undefined) ? pg.matchStats.damageTaken : matchStats.damageTaken;
+        statTaken.innerText = String(Math.max(0, Math.round(val || 0)));
+    }
+    if (statAbilities) {
+        const val = (pg && pg.matchStats && pg.matchStats.abilitiesUsed !== undefined) ? pg.matchStats.abilitiesUsed : matchStats.abilitiesUsed;
+        statAbilities.innerText = String(Math.max(0, Math.round(val || 0)));
+    }
+    if (statTurns) {
+        const val = (pg && pg.matchStats && pg.matchStats.turnSwaps !== undefined) ? pg.matchStats.turnSwaps : matchStats.turnSwaps;
+        statTurns.innerText = String(Math.max(0, Math.round(val || 0)));
+    }
 
     // Data handling with defensive aliases
     try {
-        const classId = pg.lastMatchClassId || pg.classId || 'voidWeaver';
+        const classId = pg ? (pg.lastMatchClassId || pg.classId || 'voidWeaver') : 'voidWeaver';
         console.log("Target ClassId:", classId);
         
-        const charData = (pg.classes && pg.classes[classId]) || 
-                         (pg.classes && pg.classes['aegisKnight']) || 
+        const charData = (pg && pg.classes && pg.classes[classId]) || 
+                         (pg && pg.classes && pg.classes['aegisKnight']) || 
                          { level: 1, xp: 0 };
         
         console.log("Target CharData:", charData);
         
         const charLevel = charData.level || 1;
         const charXp = (charData.xp !== undefined) ? charData.xp : 0;
-        const xpGained = pg.xpGained || (won ? 50 : 10);
+        const xpGained = pg ? (pg.xpGained || (won ? 50 : 10)) : (won ? 30 : 10);
         const charNeed = Math.max(100, charLevel * 100);
         const endCharPct = classLevelProgress(charData).pct;
         const preClassXp = Math.max(0, charXp - xpGained);
         const startCharPct = charNeed > 0 ? Math.min(100, Math.max(0, (preClassXp / charNeed) * 100)) : 0;
         const charName = CHARACTER_CLASSES.find((x) => x.id === classId)?.name || 'Class';
+        const questCount = pg && pg.questCompleted ? pg.questCompleted.length : 0;
+        const progressCopy = pg && pg.leveledUp
+            ? 'Level up secured'
+            : questCount > 0
+                ? `${questCount} quest${questCount === 1 ? '' : 's'} progressed`
+                : pg && pg.isRanked
+                    ? 'Rank adjusted'
+                    : 'Roster XP banked';
 
         console.log("Calculated: Level", charLevel, "XP", charXp, "Gained", xpGained);
 
         xpGainedEl.innerText = xpGained;
-        levelEl.innerText = pg.leveledUp ? Math.max(1, charLevel - 1) : charLevel;
+        levelEl.innerText = (pg && pg.leveledUp) ? Math.max(1, charLevel - 1) : charLevel;
+        if (outcomeCopyEl) outcomeCopyEl.innerText = won ? 'Strong finish' : 'Regroup and queue again';
+        if (heroCopyEl) heroCopyEl.innerText = charName;
+        if (progressCopyEl) progressCopyEl.innerText = progressCopy;
 
-        bpRankEl.innerText = pg.level || 1;
+        bpRankEl.innerText = (pg && pg.level) || 1;
         bpXpGained.innerText = `+${xpGained} XP (${charName})`;
 
-        const rosterEnd = sumRosterXpProgress(pg.classes);
+        const rosterEnd = sumRosterXpProgress(pg ? pg.classes : null);
         const rosterStartPct = rosterPctAfterSubtractingClassXp(pg, classId, xpGained);
+
+        if (pg.isRanked) {
+            rankedMod.classList.remove('hidden');
+            const sign = pg.rankedDelta >= 0 ? '+' : '';
+            rankedDeltaEl.innerText = `${sign}${pg.rankedDelta} MMR`;
+            rankedDeltaEl.style.color = pg.rankedDelta >= 0 ? '#00ff88' : '#ff4444';
+            
+            const rPlacements = pg.rankedRecord ? pg.rankedRecord.placements : 0;
+            const rMmr = pg.rankedRecord ? pg.rankedRecord.mmr : 1000;
+            let rTier = `Unranked (${rPlacements}/5)`;
+            if (rPlacements >= 5) {
+                if (rMmr < 1150) rTier = `Bronze (${rMmr})`;
+                else if (rMmr < 1300) rTier = `Silver (${rMmr})`;
+                else if (rMmr < 1500) rTier = `Gold (${rMmr})`;
+                else if (rMmr < 1850) rTier = `Platinum (${rMmr})`;
+                else rTier = `Diamond (${rMmr})`;
+            }
+            rankedTierEl.innerText = rTier;
+        } else {
+            rankedMod.classList.add('hidden');
+        }
 
         console.groupEnd();
         // Wait for pop-in animation
@@ -2595,8 +5138,7 @@ bindSplashButton(btnExitEl, () => window.handleSplashExit());
 const btnDuelToastSocial = document.getElementById('btn-duel-toast-social');
 if (btnDuelToastSocial) {
     btnDuelToastSocial.addEventListener('click', () => {
-        document.getElementById('social-container').classList.remove('hidden');
-        fetchFriends();
+        openSocialHub('friends');
     });
 }
 
@@ -2607,8 +5149,7 @@ if (btnDuelToastSocial) {
             const t = e.target.closest('.menu-activity-item');
             if (!t) return;
             closeMenuActivityPopover();
-            document.getElementById('social-container').classList.remove('hidden');
-            fetchFriends();
+            openSocialHub('friends');
             if (typeof sfx !== 'undefined' && typeof sfx.playClick === 'function') sfx.playClick();
         });
     }
@@ -2781,24 +5322,40 @@ function renderEmotePresetsModal() {
     // Render pool
     const poolEl = document.getElementById('emote-pool');
     poolEl.innerHTML = '';
+    
+    // First 8 emotes are free, the rest must be unlocked
+    const freeEmotes = ALL_EMOTES.slice(0, 8);
+    
     ALL_EMOTES.forEach(emote => {
         const btn = document.createElement('button');
-        btn.className = 'emote-pool-btn' + (activeEmotes.includes(emote) ? ' in-use' : '');
-        btn.innerText = emote;
-        btn.addEventListener('click', () => {
-            // Replace the active slot with this emote (swap if already in use)
-            const existingIdx = activeEmotes.indexOf(emote);
-            if (existingIdx !== -1) {
-                // Swap
-                activeEmotes[existingIdx] = activeEmotes[editingSlot];
-            }
-            activeEmotes[editingSlot] = emote;
-            saveEmotePresets(activeEmotes);
-            sfx.playClick();
-            // Advance to next slot
-            editingSlot = (editingSlot + 1) % 4;
-            renderEmotePresetsModal();
-        });
+        const inUse = activeEmotes.includes(emote);
+        
+        const unlocked = freeEmotes.includes(emote) || (playerProfileData && playerProfileData.unlockedCosmetics && playerProfileData.unlockedCosmetics.includes(emote));
+        
+        if (!unlocked) {
+            btn.className = 'emote-pool-btn locked-emote';
+            btn.innerHTML = `${emote}<br><span style="font-size:0.5rem; color:#ff00cc;">LOCKED</span>`;
+            btn.disabled = true;
+            btn.style.opacity = '0.4';
+            btn.style.cursor = 'not-allowed';
+        } else {
+            btn.className = 'emote-pool-btn' + (inUse ? ' in-use' : '');
+            btn.innerText = emote;
+            btn.addEventListener('click', () => {
+                // Replace the active slot with this emote (swap if already in use)
+                const existingIdx = activeEmotes.indexOf(emote);
+                if (existingIdx !== -1) {
+                    // Swap
+                    activeEmotes[existingIdx] = activeEmotes[editingSlot];
+                }
+                activeEmotes[editingSlot] = emote;
+                saveEmotePresets(activeEmotes);
+                if (typeof sfx !== 'undefined' && sfx.playClick) sfx.playClick();
+                // Advance to next slot
+                editingSlot = (editingSlot + 1) % 4;
+                renderEmotePresetsModal();
+            });
+        }
         poolEl.appendChild(btn);
     });
 }
@@ -2825,16 +5382,213 @@ if (btnCloseEmotePresets) {
 }
 
 // Add click sound to all major menu buttons
- ['btn-play-game','btn-character','btn-leaderboard','btn-profile','btn-social','btn-settings',
+ ['btn-play-game','btn-character','btn-leaderboard','btn-profile','btn-friends','btn-guild','btn-settings',
   'btn-close-char-menu','btn-close-profile','btn-close-settings','btn-close-leaderboard',
   'btn-close-changelog','btn-view-changelog','btn-return','btn-disconnect-ok',
   'btn-quick-match','btn-private-choice','btn-close-play-mode','btn-close-private',
   'btn-host-choice','btn-join-choice','btn-submit-join','btn-rematch','btn-rematch-bo3','btn-splash-exit',
   'btn-duel-toast-social',
   'btn-menu-activity', 'btn-menu-activity-close',
-  'btn-battle-pass', 'btn-emote-presets', 'btn-save-customization',
+  'btn-battle-pass', 'btn-emote-presets', 'btn-save-customization', 'btn-save-profile-title', 'btn-hero-ready',
   'btn-perf-overlay', 'btn-a11y-large-text', 'btn-a11y-high-contrast', 'btn-a11y-hp-bars', 'btn-reduce-motion',
   'btn-menu-vfx', 'btn-camera-shake', 'btn-hit-stop'].forEach(id => {
      const el = document.getElementById(id);
      if (el) el.addEventListener('click', () => sfx.playClick(), true);
  });
+
+function submitLumenReport(payload) {
+    return fetch('/report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, reporterUid: localUid, clientVersion: '1.6.1' })
+    }).then((r) => r.json());
+}
+
+function closeReportPlayerModal() {
+    const m = document.getElementById('report-player-modal');
+    if (m) m.classList.add('hidden');
+    const err = document.getElementById('report-error');
+    const ok = document.getElementById('report-success');
+    if (err) {
+        err.classList.add('hidden');
+        err.textContent = '';
+    }
+    if (ok) {
+        ok.classList.add('hidden');
+        ok.textContent = '';
+    }
+}
+
+function openReportPlayerModal() {
+    const m = document.getElementById('report-player-modal');
+    if (!m) return;
+    const err = document.getElementById('report-error');
+    const ok = document.getElementById('report-success');
+    const det = document.getElementById('report-details');
+    if (err) {
+        err.classList.add('hidden');
+        err.textContent = '';
+    }
+    if (ok) {
+        ok.classList.add('hidden');
+        ok.textContent = '';
+    }
+    if (det) det.value = '';
+    m.classList.remove('hidden');
+}
+
+document.getElementById('btn-splash-report')?.addEventListener('click', () => {
+    if (typeof sfx !== 'undefined' && sfx.playClick) sfx.playClick();
+    if (typeof lastReportContext !== 'undefined' && !lastReportContext.reportedUid && gameState && myPlayerId) {
+        // Fallback for splash: try to guess opponent if not set
+        const oid = myPlayerId === 'p1' ? 'p2' : 'p1';
+        const opp = gameState.players[oid];
+        if (opp) lastReportContext.reportedUid = opp.uid;
+    }
+    openReportPlayerModal();
+});
+
+// HUD Report Buttons
+document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.btn-report-hud');
+    if (btn) {
+        e.stopPropagation();
+        if (typeof sfx !== 'undefined' && sfx.playClick) sfx.playClick();
+        const pId = btn.getAttribute('data-player-id');
+        if (gameState && gameState.players && gameState.players[pId]) {
+            const p = gameState.players[pId];
+            lastReportContext.reportedUid = p.uid;
+            lastReportContext.roomId = lastRoomId;
+            openReportPlayerModal();
+        }
+    }
+});
+
+document.getElementById('btn-report-cancel')?.addEventListener('click', () => {
+    if (typeof sfx !== 'undefined' && sfx.playClick) sfx.playClick();
+    closeReportPlayerModal();
+});
+
+document.getElementById('btn-report-submit')?.addEventListener('click', async () => {
+    if (typeof sfx !== 'undefined' && sfx.playClick) sfx.playClick();
+    const cat = document.getElementById('report-category')?.value || 'other';
+    const details = (document.getElementById('report-details')?.value || '').trim();
+    const errEl = document.getElementById('report-error');
+    const okEl = document.getElementById('report-success');
+    if (okEl) {
+        okEl.classList.add('hidden');
+        okEl.textContent = '';
+    }
+    if (!lastReportContext.reportedUid) {
+        if (errEl) {
+            errEl.textContent = 'Could not identify the opponent for this match.';
+            errEl.classList.remove('hidden');
+        }
+        return;
+    }
+    if (errEl) errEl.classList.add('hidden');
+    try {
+        const res = await submitLumenReport({
+            reportedUid: lastReportContext.reportedUid,
+            category: cat,
+            roomId: lastReportContext.roomId,
+            details: details || undefined
+        });
+        if (res && res.ok) {
+            if (okEl) {
+                okEl.textContent = 'Report sent. Thank you.';
+                okEl.classList.remove('hidden');
+            }
+            setTimeout(() => closeReportPlayerModal(), 1200);
+        } else if (errEl) {
+            errEl.textContent = (res && res.error) || 'Could not send report. Try again later.';
+            errEl.classList.remove('hidden');
+        }
+    } catch (e) {
+        if (errEl) {
+            errEl.textContent = 'Network error. Is the Worker running?';
+            errEl.classList.remove('hidden');
+        }
+    }
+});
+function syncSpritesToLatestPlayers() {
+    if (!gameState || !gameState.players || !myPlayerId) return;
+    const myP = gameState.players[myPlayerId];
+    const oppId = myPlayerId === 'p1' ? 'p2' : 'p1';
+    const oppP = gameState.players[oppId];
+
+    if (myP && myP.classId && playerLeftShape) {
+        let tex = textureKeyForClassAndSkin(myP.classId, myP.equippedSkin || 'Default');
+        if (playerLeftShape.active) {
+            playerLeftShape.setTexture(tex);
+            applyPhaserCharacterScales(playerLeftShape.scene);
+        }
+    }
+    if (oppP && oppP.classId && playerRightShape) {
+        let tex = textureKeyForClassAndSkin(oppP.classId, oppP.equippedSkin || 'Default');
+        if (playerRightShape.active) {
+            playerRightShape.setTexture(tex);
+            applyPhaserCharacterScales(playerRightShape.scene);
+        }
+    }
+}
+
+// ============================================================
+// BANNED NOTIFICATION SYSTEM
+// ============================================================
+let bannedTimer = null;
+
+function showBannedModal(until) {
+    const modal = document.getElementById('banned-modal');
+    if (!modal) return;
+
+    modal.classList.remove('hidden');
+    
+    // Hide other overlays that might conflict
+    document.getElementById('matchmaking-overlay')?.classList.add('hidden');
+    document.getElementById('play-mode-modal')?.classList.add('hidden');
+
+    const timer = document.getElementById('banned-countdown-timer');
+    const container = document.getElementById('banned-countdown-container');
+    const permText = document.getElementById('banned-perm-text');
+
+    if (bannedTimer) clearInterval(bannedTimer);
+
+    if (!until) {
+        // Permanent ban
+        if (container) container.classList.add('hidden');
+        if (permText) permText.classList.remove('hidden');
+        if (timer) timer.innerText = '-- : -- : --';
+    } else {
+        // Temporary ban
+        if (container) container.classList.remove('hidden');
+        if (permText) permText.classList.add('hidden');
+
+        const updateTimer = () => {
+            const now = Date.now();
+            const diff = until - now;
+            if (diff <= 0) {
+                if (timer) timer.innerText = '00 : 00 : 00';
+                clearInterval(bannedTimer);
+                // Optionally auto-refresh profile to clear ban UI
+                fetchPlayerProfile(true);
+                return;
+            }
+            const hours = Math.floor(diff / 3600000);
+            const mins = Math.floor((diff % 3600000) / 60000);
+            const secs = Math.floor((diff % 60000) / 1000);
+            if (timer) {
+                timer.innerText = `${String(hours).padStart(2, '0')} : ${String(mins).padStart(2, '0')} : ${String(secs).padStart(2, '0')}`;
+            }
+        };
+        updateTimer();
+        bannedTimer = setInterval(updateTimer, 1000);
+    }
+}
+
+// Exit button for banned modal
+document.getElementById('btn-banned-exit')?.addEventListener('click', () => {
+    // For a web app, we can just clear UIDs or just refresh to a safe state
+    // But since the ban is server-side, a simple reload is cleanest
+    window.location.reload();
+});
