@@ -4,8 +4,8 @@
   "description": "Backend for Lumen Clash",
   "private": true,
   "scripts": {
-    "dev": "wrangler dev --ip 0.0.0.0 --port 8790 --persist-to clean-state",
-    "deploy": "wrangler deploy"
+    "dev": "wrangler dev --config ./wrangler.toml --ip 0.0.0.0 --port 8790 --persist-to clean-state",
+    "deploy": "wrangler deploy --config ./wrangler.toml"
   },
   "devDependencies": {
     "wrangler": "^3.0.0"

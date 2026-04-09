@@ -1,0 +1,12 @@
+﻿{
+  "name": "Lumen Clash",
+  "short_name": "Lumen Clash",
+  "description": "Tactical duels in your browser. Add to Home Screen for an app-like experience.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#07051a",
+  "theme_color": "#a78bfa",
+  "categories": ["games", "entertainment"]
+}
